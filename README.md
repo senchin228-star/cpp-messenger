@@ -2,7 +2,7 @@
 
 **A C++ client-server messaging system built with TCP sockets and a custom JSON-based protocol.**
 
-Wiretalk is an individual academic project focused on low-level network programming, client-server architecture, and the practical implementation of a messaging system in C++.
+Wiretalk is an individual school project focused on low-level network programming, client-server architecture, and the practical implementation of a messaging system in C++.
 
 The project is being developed as part of a school individual project.
 
