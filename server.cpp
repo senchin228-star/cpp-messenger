@@ -1,13 +1,39 @@
 #include <string>
 #include <iostream>
+#include <vector>
+#include <map>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <cstring>
 #include <cerrno>
 #include <nlohmann/json.hpp>
 #include "socket.hpp"
+
+constexpr std::size_t MAX_BUFFER = 4096;
+
+bool process_buffer(Client& client) {
+    std::size_t pos;
+    while ((pos = client.buffer.find('\n')) != std::string::npos) {
+        std::string line = client.buffer.substr(0, pos);
+        client.buffer.erase(0, pos + 1);
+        if (line.empty()) continue;
+        try {
+            auto j = nlohmann::json::parse(line);
+            std::cout << j.at("type").get<std::string>() << ": "
+                      << j.at("message").get<std::string>() << std::endl;
+        } catch (const nlohmann::json::exception& e) {
+            std::cerr << "Bad message: " << e.what() << std::endl;
+        }
+    }
+    if (client.buffer.size() > MAX_BUFFER) {
+        std::cerr << "Message too long, dropping client" << std::endl;
+        return false;
+    }
+    return true;
+}
 
 int main(){
     Socket listen_sock(socket(AF_INET, SOCK_STREAM, 0));
@@ -28,59 +54,61 @@ int main(){
         std::cerr << "Error binding socket: " << strerror(errno) << std::endl;
         return 1;
     }
-
     if (listen(listen_sock.get(), 5) < 0) {
         std::cerr << "Error listening on socket: " << strerror(errno) << std::endl;
         return 1;
     }
-    std::cout << "Server is listening on port 5050..." << std::endl; 
+    std::cout << "Server is listening on port 5050..." << std::endl;
 
-    struct sockaddr_in client_addr = {};
-    socklen_t client_addr_len = sizeof(client_addr);
-
-    Socket client_sock(accept(listen_sock.get(),
-     reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len));
-    if (client_sock.get() < 0) {
-        std::cerr << "Error accepting connection: " << strerror(errno) << std::endl;
-        return 1;
-    }
-
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    std::cout << "Accepted connection from " << client_ip << ":" << ntohs(client_addr.sin_port) << std::endl;
-
-    constexpr std::size_t MAX_BUFFER = 4096;
-    std::string buffer;
+    std::vector<pollfd> fds;
+    fds.push_back({listen_sock.get(), POLLIN, 0});
+    std::map<int, Client> clients;
     char recv_buffer[4096];
-    while (true) {
-        ssize_t bytes_received = recv(client_sock.get(), recv_buffer, sizeof(recv_buffer), 0);
-        if (bytes_received < 0) {
-            if (errno == EINTR) {
-                continue; // Interrupted by signal, retry
-            }
+    
+
+    while (true){
+        if (poll(fds.data(), fds.size(), -1) < 0) {
+            if (errno == EINTR) continue;
+            std::cout << "pollfd error" << std::endl;
             return 1;
         }
-        if (bytes_received == 0) {
-            std::cout << "Client disconnected" << std::endl;
-            break;
-        }
-        buffer.append(recv_buffer, static_cast<std::size_t>(bytes_received));
-        std::size_t pos;
-        while ((pos = buffer.find('\n')) != std::string::npos) {
-            std::string line = buffer.substr(0, pos);
-            buffer.erase(0, pos + 1);
-            if (line.empty()) continue;
-            try{
-                auto j = nlohmann::json::parse(line);
-                std::cout << j.at("type").get<std::string>() << ": ";
-                std::cout << j.at("message").get<std::string>() << std::endl;
-            }catch (const nlohmann::json::exception& e){
-                std::cerr <<"bad message" << e.what() << std::endl;
+        if (fds[0].revents & POLLIN){
+            sockaddr_in client_addr = {};
+            socklen_t client_addr_len = sizeof(client_addr);
+            Socket client_sock(accept(listen_sock.get(),
+            reinterpret_cast<struct sockaddr*>(&client_addr), &client_addr_len));
+            if (client_sock.get() < 0) {
+                std::cerr << "Error accepting connection: " << strerror(errno) << std::endl;
+                continue;
             }
+            int fd = client_sock.get();
+            clients.emplace(fd, Client{std::move(client_sock), ""});
+            fds.push_back({fd, POLLIN, 0});
         }
-        if (buffer.size() > MAX_BUFFER) {
-            std::cerr << "Message too long, droping clinet" << std::endl;
-            break;
+        for (std::size_t i = fds.size(); i-- > 1; ) {
+            if (!(fds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+
+            int fd = fds[i].fd;
+            Client& client = clients.at(fd);
+            bool keep = true;
+
+            ssize_t n = recv(fd, recv_buffer, sizeof(recv_buffer), 0);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                std::cerr << "Error receiving data: " << strerror(errno) << std::endl;
+                keep = false;
+            } else if (n == 0) {
+                std::cout << "Client disconnected" << std::endl;
+                keep = false;
+            } else {
+                client.buffer.append(recv_buffer, static_cast<std::size_t>(n));
+                keep = process_buffer(client);
+            }
+
+            if (!keep) {
+                clients.erase(fd);
+                fds.erase(fds.begin() + static_cast<std::ptrdiff_t>(i));
+            }
         }
     }
     return 0;
