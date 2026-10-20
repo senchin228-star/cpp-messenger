@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 #include <cerrno>
 #include "socket.hpp"
+#include "net.hpp"
 
 std::string trim(const std::string& str) {
     auto first = str.find_first_not_of(" \t\n\r");
@@ -48,22 +49,7 @@ int main(){
         json_message["type"] = "text";
 
         std::string message = json_message.dump() + "\n";
-        std::size_t sent_total = 0;
-        while (sent_total < message.size()) {
-            ssize_t sent = send(sock.get(),
-                message.data() + sent_total,
-                message.size() - sent_total,
-                MSG_NOSIGNAL
-            );
-            if (sent < 0) {
-                std::cerr << "Error sending data:" << std::endl;
-                if (errno == EPIPE) {
-                    std::cerr << "Server closed the connection" << std::endl;
-                    return 1;
-                }
-            }
-            sent_total += static_cast<std::size_t>(sent);
-        }
+        send_all(sock.get(), message);
     }
     return 0;
 }

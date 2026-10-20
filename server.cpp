@@ -11,10 +11,20 @@
 #include <cerrno>
 #include <nlohmann/json.hpp>
 #include "socket.hpp"
+#include "net.hpp"
 
 constexpr std::size_t MAX_BUFFER = 4096;
 
-bool process_buffer(Client& client) {
+void broadcast(std::map<int, Client>& clients, const std::string payload, int exclude_fd = -1)
+{
+    for (auto& [fd, client] : clients){
+        if (fd == exclude_fd) continue;
+        if(!send_all(fd, payload)) {
+            std::cerr << "Send to fd " << fd << " failed: " << strerror(errno) << std::endl;
+        }
+    }
+}
+bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
     std::size_t pos;
     while ((pos = client.buffer.find('\n')) != std::string::npos) {
         std::string line = client.buffer.substr(0, pos);
@@ -22,8 +32,12 @@ bool process_buffer(Client& client) {
         if (line.empty()) continue;
         try {
             auto j = nlohmann::json::parse(line);
+            nlohmann::json out;
             std::cout << j.at("type").get<std::string>() << ": "
                       << j.at("message").get<std::string>() << std::endl;
+            out["type"] = "text";
+            out["message"] = j.at("message").get<std::string>();
+            broadcast(clients, out.dump() +  "\n", fd);
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "Bad message: " << e.what() << std::endl;
         }
@@ -34,7 +48,6 @@ bool process_buffer(Client& client) {
     }
     return true;
 }
-
 int main(){
     Socket listen_sock(socket(AF_INET, SOCK_STREAM, 0));
     if (listen_sock.get() < 0) {
@@ -87,7 +100,6 @@ int main(){
         }
         for (std::size_t i = fds.size(); i-- > 1; ) {
             if (!(fds[i].revents & (POLLIN | POLLERR | POLLHUP))) continue;
-
             int fd = fds[i].fd;
             Client& client = clients.at(fd);
             bool keep = true;
@@ -102,7 +114,7 @@ int main(){
                 keep = false;
             } else {
                 client.buffer.append(recv_buffer, static_cast<std::size_t>(n));
-                keep = process_buffer(client);
+                keep = process_buffer(client, fds[0].fd, clients);
             }
 
             if (!keep) {
