@@ -34,9 +34,11 @@ bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
             auto j = nlohmann::json::parse(line);
             nlohmann::json out;
             std::cout << j.at("type").get<std::string>() << ": "
+                      << j.at("nickname").get<std::string>() << std::endl
                       << j.at("message").get<std::string>() << std::endl;
             out["type"] = "text";
             out["message"] = j.at("message").get<std::string>();
+            out["nickname"] = j.at("nickname").get<std::string>();
             broadcast(clients, out.dump() +  "\n", fd);
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "Bad message: " << e.what() << std::endl;

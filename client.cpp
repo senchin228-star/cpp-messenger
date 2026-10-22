@@ -27,8 +27,8 @@ void handle_server_data(std::string& buffer)
         buffer.erase(0, pos + 1);
         try{
             auto j = nlohmann::json::parse(line);
-            if (j.contains("type") && j["type"] == "text"){
-                std::cout << j.at("message").get<std::string>() << std::endl;
+            if (j.contains("type") && j.contains("nickname") && j["type"] == "text"){
+                std::cout << j.at("nickname").get<std::string>() << ": " <<  j.at("message").get<std::string>() << std::endl;
             }
         }
         catch(const nlohmann::json::exception& e){
@@ -36,7 +36,11 @@ void handle_server_data(std::string& buffer)
         }
     }
 }
-int main(){
+int main(int argc, char *argv[]){
+    if (argc < 2){
+        std::cout << "A nickname is required as the first argument." << std::endl;
+        return 1;
+    }
     Socket sock(socket(AF_INET, SOCK_STREAM, 0));
     if (sock.get() < 0) {
         std::cerr << "Error creating socket" << std::endl;
@@ -94,6 +98,7 @@ int main(){
         nlohmann::json json_message;
         json_message["message"] = input;
         json_message["type"] = "text";
+        json_message["nickname"] = argv[1];
         std::string message = json_message.dump() + "\n";
         send_all(sock.get(), message);
         }
