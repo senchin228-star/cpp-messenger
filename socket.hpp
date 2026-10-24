@@ -43,9 +43,13 @@ private:
 
 public:
     std::string buffer;
+    std::string name;
 
     Client() : sock(-1) {}
 
     Client(Socket socket, std::string initial_buffer = {})
         : sock(std::move(socket)), buffer(std::move(initial_buffer)) {}
+    int get_sock() const {
+        return sock.get();
+    }
 };

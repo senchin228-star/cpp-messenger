@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <cstring>
 #include <nlohmann/json.hpp>
 #include <cerrno>
 #include <poll.h>
@@ -19,7 +20,7 @@ std::string trim(const std::string& str) {
     auto last = str.find_last_not_of(" \t\n\r");
     return str.substr(first, last - first + 1);
 }
-void handle_server_data(std::string& buffer)
+bool handle_server_data(std::string& buffer)
 {
     std::size_t pos;
     while ((pos = buffer.find('\n')) != std::string::npos){
@@ -27,18 +28,35 @@ void handle_server_data(std::string& buffer)
         buffer.erase(0, pos + 1);
         try{
             auto j = nlohmann::json::parse(line);
-            if (j.contains("type") && j.contains("nickname") && j["type"] == "text"){
+            std::string type = j.at("type").get<std::string>();
+            if (type.empty()) continue;
+            if (type == "text" && j.contains("nickname")){
                 std::cout << j.at("nickname").get<std::string>() << ": " <<  j.at("message").get<std::string>() << std::endl;
             }
+            else if (type == "login_result"){
+                if (j.at("ok").get<bool>()){
+                    std::cout << "Login success" << std::endl;
+                }
+                else{
+                    std::cout << "Login unsucces. Reason:" << j.at("reason").get<std::string>() << '\n' << std::endl;
+                    return false;
+                }
+            }
+            else if (type != "text") std::cout << "Unknown type" << std::endl;
         }
         catch(const nlohmann::json::exception& e){
             std::cerr << "Bad message: " << e.what() << std::endl;
         }
     }
+    return true;
 }
 int main(int argc, char *argv[]){
     if (argc < 2){
         std::cout << "A nickname is required as the first argument." << std::endl;
+        return 1;
+    }
+    if (strlen(argv[1]) > 16){
+        std::cout << "Nickname is too long" << std::endl;
         return 1;
     }
     Socket sock(socket(AF_INET, SOCK_STREAM, 0));
@@ -59,9 +77,31 @@ int main(int argc, char *argv[]){
         return 1;
     }
     std::cout << "Connected to server!" << std::endl;
-    std::string buffer;
-    std::string input;
+
     char recv_buffer[4096];
+    std::string buffer;
+    nlohmann::json join_request_js = {
+        {"type", "login"},
+        {"user", argv[1]}
+    };
+    std::string join_request_str = join_request_js.dump() + '\n';
+    if (!send_all(sock.get(), join_request_str)) return 1;
+    while (buffer.find('\n') == std::string::npos){
+        ssize_t n = recv(sock.get(), recv_buffer, sizeof(recv_buffer), 0);
+        if (n < 0){
+            if (errno == EINTR) continue;
+            std::cerr << "Error receiving data: " << strerror(errno) << std::endl;
+            return 1;
+        }
+        if (n == 0){
+            std::cout << "Server closed the connection" << std::endl;
+            return 1;
+        }
+        buffer.append(recv_buffer, static_cast<std::size_t>(n));
+    }
+    if (!handle_server_data(buffer)) return 1;
+
+    std::string input;
 
     pollfd fds[2];
     fds[0] = {STDIN_FILENO, POLLIN, 0};
@@ -98,7 +138,6 @@ int main(int argc, char *argv[]){
         nlohmann::json json_message;
         json_message["message"] = input;
         json_message["type"] = "text";
-        json_message["nickname"] = argv[1];
         std::string message = json_message.dump() + "\n";
         send_all(sock.get(), message);
         }

@@ -32,14 +32,44 @@ bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
         if (line.empty()) continue;
         try {
             auto j = nlohmann::json::parse(line);
-            nlohmann::json out;
-            std::cout << j.at("type").get<std::string>() << ": "
-                      << j.at("nickname").get<std::string>() << std::endl
-                      << j.at("message").get<std::string>() << std::endl;
-            out["type"] = "text";
-            out["message"] = j.at("message").get<std::string>();
-            out["nickname"] = j.at("nickname").get<std::string>();
-            broadcast(clients, out.dump() +  "\n", fd);
+            std::string type = j.at("type").get<std::string>();
+            if (type.empty()) continue;
+            nlohmann::json out = {};
+            if (type == "login"){
+                const std::string username = j.at("user").get<std::string>();
+                std::string reason;
+                if (username.empty()) reason = "Empty user name";
+                for (const auto& [other_fd, other_client] : clients){
+                    if (other_fd != client.get_sock() && other_client.name == username){
+                        reason = "Already logged in";
+                        break;
+                    }
+                }
+                out = {
+                    {"type", "login_result"},
+                    {"ok", reason.empty()},
+                    {"reason", reason}
+                };
+                std::string log_res = out.dump() + '\n';
+                if (!send_all(client.get_sock(), log_res)) return false;
+                if (!reason.empty()){
+                    std::cout << username << ": Login unsucces. Reason: "<< reason << std::endl;
+                    return false;
+                }
+                else{
+                    client.name = username;
+                    std::cout << username << " Logined" << std::endl;
+                }
+            }
+            if (type == "text"){
+                std::cout << "type: " << j.at("type").get<std::string>() + "   "
+                        << client.name << ": "
+                        << j.at("message").get<std::string>() << std::endl;
+                out["type"] = "text";
+                out["message"] = j.at("message").get<std::string>();
+                out["nickname"] = client.name;
+                broadcast(clients, out.dump() +  "\n", fd);
+            }
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "Bad message: " << e.what() << std::endl;
         }
@@ -80,7 +110,6 @@ int main(){
     std::map<int, Client> clients;
     char recv_buffer[4096];
     
-
     while (true){
         if (poll(fds.data(), fds.size(), -1) < 0) {
             if (errno == EINTR) continue;
