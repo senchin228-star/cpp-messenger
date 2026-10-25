@@ -42,7 +42,10 @@ bool handle_server_data(std::string& buffer)
                     return false;
                 }
             }
-            else if (type != "text") std::cout << "Unknown type" << std::endl;
+            else if (type == "error"){
+                std::cout << j.at("er_text") << std::endl;
+            }
+            else std::cout << "Unknown type" << std::endl;
         }
         catch(const nlohmann::json::exception& e){
             std::cerr << "Bad message: " << e.what() << std::endl;

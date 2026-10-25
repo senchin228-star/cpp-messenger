@@ -4,6 +4,7 @@
 #include <string>
 #include <utility>
 #include <unistd.h>
+#include <chrono>
 
 class Socket {
 private:
@@ -44,11 +45,13 @@ private:
 public:
     std::string buffer;
     std::string name;
+    std::chrono::steady_clock::time_point connected_at;
 
-    Client() : sock(-1) {}
+    Client() : sock(-1), connected_at(std::chrono::steady_clock::now()) {}
 
     Client(Socket socket, std::string initial_buffer = {})
-        : sock(std::move(socket)), buffer(std::move(initial_buffer)) {}
+        : sock(std::move(socket)), buffer(std::move(initial_buffer)),
+          connected_at(std::chrono::steady_clock::now()) {}
     int get_sock() const {
         return sock.get();
     }
