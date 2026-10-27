@@ -1,4 +1,5 @@
 #include <string>
+#include <sstream>
 #include <iostream>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -32,6 +33,10 @@ bool handle_server_data(std::string& buffer)
             if (type.empty()) continue;
             if (type == "text" && j.contains("nickname")){
                 std::cout << j.at("nickname").get<std::string>() << ": " <<  j.at("message").get<std::string>() << std::endl;
+            }
+            else if (type == "private") {
+                std::cout << "Private from " << j.at("from").get<std::string>()
+                          << ": " << j.at("message").get<std::string>() << std::endl;
             }
             else if (type == "login_result"){
                 if (j.at("ok").get<bool>()){
@@ -138,11 +143,32 @@ int main(int argc, char *argv[]){
                 std::cout << "Skipping empty message." << std::endl;
                 continue;
             }
-        nlohmann::json json_message;
-        json_message["message"] = input;
-        json_message["type"] = "text";
-        std::string message = json_message.dump() + "\n";
-        send_all(sock.get(), message);
+            nlohmann::json json_message;
+            std::istringstream input_stream(input);
+            std::string command;
+            input_stream >> command;
+            if (command == "/msg") {
+                std::string recipient;
+                if (!(input_stream >> recipient)) {
+                    std::cout << "Usage: /msg <nickname> <message>" << std::endl;
+                    continue;
+                }
+                std::string private_message;
+                std::getline(input_stream, private_message);
+                private_message = trim(private_message);
+                if (private_message.empty()) {
+                    std::cout << "Private message cannot be empty." << std::endl;
+                    continue;
+                }
+                json_message["type"] = "private";
+                json_message["to"] = recipient;
+                json_message["message"] = private_message;
+            } else {
+                json_message["type"] = "text";
+                json_message["message"] = input;
+            }
+            std::string message = json_message.dump() + "\n";
+            send_all(sock.get(), message);
         }
     }
     return 0;

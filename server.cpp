@@ -87,6 +87,31 @@ bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
                 }
             }
             if (client.name.empty()) continue;
+            if (type == "private") {
+                const std::string recipient_name = j.at("to").get<std::string>();
+                const std::string private_message = j.at("message").get<std::string>();
+                auto recipient = std::find_if(clients.begin(), clients.end(),
+                    [&recipient_name](const auto& entry) {
+                        return entry.second.name == lowercase(recipient_name);
+                    });
+                if (recipient == clients.end()) {
+                    nlohmann::json error = {
+                        {"type", "error"},
+                        {"er_text", "User not found: " + recipient_name}
+                    };
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
+                out = {
+                    {"type", "private"},
+                    {"from", client.name},
+                    {"message", private_message}
+                };
+                if (!send_all(recipient->first, out.dump() + '\n')) {
+                    std::cerr << "Send private message to " << recipient_name
+                              << " failed: " << strerror(errno) << std::endl;
+                }
+            }
             if (type == "text"){
                 std::cout << "type: " << j.at("type").get<std::string>() + "   "
                         << client.name << ": "
