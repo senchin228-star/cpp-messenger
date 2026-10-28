@@ -32,7 +32,13 @@ bool handle_server_data(std::string& buffer)
             std::string type = j.at("type").get<std::string>();
             if (type.empty()) continue;
             if (type == "text" && j.contains("nickname")){
-                std::cout << j.at("nickname").get<std::string>() << ": " <<  j.at("message").get<std::string>() << std::endl;
+                std::cout << "[" << j.at("room").get<std::string>() << "] "
+                          << j.at("nickname").get<std::string>() << ": "
+                          << j.at("message").get<std::string>() << std::endl;
+            }
+            else if (type == "system") {
+                std::cout << "[" << j.value("room", std::string{}) << "] "
+                          << j.at("message").get<std::string>() << std::endl;
             }
             else if (type == "private") {
                 std::cout << "Private from " << j.at("from").get<std::string>()
@@ -49,6 +55,13 @@ bool handle_server_data(std::string& buffer)
             }
             else if (type == "error"){
                 std::cout << j.at("er_text") << std::endl;
+            }
+            else if (type == "rooms") {
+                std::cout << "Joined rooms:";
+                for (const auto& room : j.at("rooms")) {
+                    std::cout << " " << room.get<std::string>();
+                }
+                std::cout << std::endl;
             }
             else std::cout << "Unknown type" << std::endl;
         }
@@ -110,6 +123,7 @@ int main(int argc, char *argv[]){
     if (!handle_server_data(buffer)) return 1;
 
     std::string input;
+    std::string current_room = "general";
 
     pollfd fds[2];
     fds[0] = {STDIN_FILENO, POLLIN, 0};
@@ -163,8 +177,53 @@ int main(int argc, char *argv[]){
                 json_message["type"] = "private";
                 json_message["to"] = recipient;
                 json_message["message"] = private_message;
+            } else if (command == "/switch") {
+                std::string room;
+                std::string extra;
+                if (!(input_stream >> room) || (input_stream >> extra)) {
+                    std::cout << "Usage: /switch <room>" << std::endl;
+                    continue;
+                }
+                current_room = room;
+                std::cout << "Active room: " << current_room << std::endl;
+                continue;
+            } else if (command == "/join" || command == "/leave") {
+                std::string room;
+                std::string extra;
+                if (!(input_stream >> room) || (input_stream >> extra)) {
+                    std::cout << "Usage: " << command << " <room>" << std::endl;
+                    continue;
+                }
+                json_message["type"] = command == "/join" ? "join" : "leave";
+                json_message["room"] = room;
+                if (command == "/join") {
+                    current_room = room;
+                    std::cout << "Active room: " << current_room << std::endl;
+                } else if (room == current_room) {
+                    current_room = "general";
+                    std::cout << "Active room: " << current_room << std::endl;
+                }
+            } else if (command == "/rooms") {
+                json_message["type"] = "rooms";
+            } else if (command == "/say") {
+                std::string room;
+                if (!(input_stream >> room)) {
+                    std::cout << "Usage: /say <room> <message>" << std::endl;
+                    continue;
+                }
+                std::string message_text;
+                std::getline(input_stream, message_text);
+                message_text = trim(message_text);
+                if (message_text.empty()) {
+                    std::cout << "Message cannot be empty." << std::endl;
+                    continue;
+                }
+                json_message["type"] = "text";
+                json_message["room"] = room;
+                json_message["message"] = message_text;
             } else {
                 json_message["type"] = "text";
+                json_message["room"] = current_room;
                 json_message["message"] = input;
             }
             std::string message = json_message.dump() + "\n";

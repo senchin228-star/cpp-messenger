@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <map>
+#include <set>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -36,16 +37,32 @@ std::string trim(std::string& str) {
     return str;
 }
 
-void broadcast(std::map<int, Client>& clients, const std::string payload, int exclude_fd = -1)
-{
-    for (auto& [fd, client] : clients){
-        if (fd == exclude_fd) continue;
-        if(!send_all(fd, payload)) {
-            std::cerr << "Send to fd " << fd << " failed: " << strerror(errno) << std::endl;
+using RoomMembers = std::map<std::string, std::set<std::string>>;
+
+void broadcast(const RoomMembers& rooms, const std::map<int, Client>& clients,
+               const std::string& room, const std::string& payload) {
+    auto room_it = rooms.find(room);
+    if (room_it == rooms.end()) return;
+
+    for (const std::string& member : room_it->second) {
+        auto client_it = std::find_if(clients.begin(), clients.end(),
+            [&member](const auto& entry) {
+                return !entry.second.name.empty() && lowercase(entry.second.name) == member;
+            });
+        if (client_it != clients.end() && !send_all(client_it->first, payload)) {
+            std::cerr << "Send to " << client_it->second.name << " failed: "
+                      << strerror(errno) << std::endl;
         }
     }
 }
-bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
+
+void send_system(const RoomMembers& rooms, const std::map<int, Client>& clients,
+                 const std::string& room, const std::string& message) {
+    nlohmann::json event = {{"type", "system"}, {"room", room}, {"message", message}};
+    broadcast(rooms, clients, room, event.dump() + '\n');
+}
+
+bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMembers& rooms) {
     std::size_t pos;
     while ((pos = client.buffer.find('\n')) != std::string::npos) {
         std::string line = client.buffer.substr(0, pos);
@@ -83,16 +100,63 @@ bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
                 }
                 else{
                     client.name = username;
+                    const std::string user_key = lowercase(client.name);
+                    const bool first_join = rooms["general"].insert(user_key).second;
+                    if (first_join) send_system(rooms, clients, "general", client.name + " joined");
                     std::cout << username << " Logined" << std::endl;
                 }
             }
             if (client.name.empty()) continue;
+            if (type == "join") {
+                std::string room = j.at("room").get<std::string>();
+                if (room.empty() || room.size() > 64 || room.find_first_of(" \t\r\n") != std::string::npos) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "Invalid room name"}};
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
+                if (rooms[room].insert(lowercase(client.name)).second) {
+                    send_system(rooms, clients, room, client.name + " joined");
+                }
+                continue;
+            }
+            if (type == "leave") {
+                const std::string room = j.at("room").get<std::string>();
+                auto room_it = rooms.find(room);
+                if (room_it == rooms.end() || room_it->second.erase(lowercase(client.name)) == 0) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "You are not in room: " + room}};
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
+                if (!room_it->second.empty()) {
+                    send_system(rooms, clients, room, client.name + " left");
+                } else {
+                    rooms.erase(room_it);
+                }
+                continue;
+            }
+            if (type == "rooms") {
+                nlohmann::json response = {{"type", "rooms"}, {"rooms", nlohmann::json::array()}};
+                const std::string user_key = lowercase(client.name);
+                for (const auto& [room, members] : rooms) {
+                    if (members.count(user_key) != 0) response["rooms"].push_back(room);
+                }
+                send_all(client.get_sock(), response.dump() + '\n');
+                continue;
+            }
             if (type == "private") {
                 const std::string recipient_name = j.at("to").get<std::string>();
+                if (recipient_name.empty()) {
+                    nlohmann::json error {
+                        {"type", "error"},
+                        {"er_text", "Empty user name"}
+                    };
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
                 const std::string private_message = j.at("message").get<std::string>();
                 auto recipient = std::find_if(clients.begin(), clients.end(),
                     [&recipient_name](const auto& entry) {
-                        return entry.second.name == lowercase(recipient_name);
+                        return entry.second.name == recipient_name;
                     });
                 if (recipient == clients.end()) {
                     nlohmann::json error = {
@@ -113,13 +177,22 @@ bool process_buffer(Client& client, int fd, std::map<int, Client>& clients) {
                 }
             }
             if (type == "text"){
+                const std::string room = j.at("room").get<std::string>();
+                const std::string user_key = lowercase(client.name);
+                auto room_it = rooms.find(room);
+                if (room_it == rooms.end() || room_it->second.count(user_key) == 0) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "Join room before sending: " + room}};
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
                 std::cout << "type: " << j.at("type").get<std::string>() + "   "
                         << client.name << ": "
                         << j.at("message").get<std::string>() << std::endl;
                 out["type"] = "text";
                 out["message"] = j.at("message").get<std::string>();
                 out["nickname"] = client.name;
-                broadcast(clients, out.dump() +  "\n", fd);
+                out["room"] = room;
+                broadcast(rooms, clients, room, out.dump() + "\n");
             }
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "Bad message: " << e.what() << std::endl;
@@ -162,6 +235,7 @@ int main(){
     std::vector<pollfd> fds;
     fds.push_back({listen_sock.get(), POLLIN, 0});
     std::map<int, Client> clients;
+    RoomMembers rooms;
     char recv_buffer[4096];
     
     while (true){
@@ -214,7 +288,7 @@ int main(){
                     keep = false;
                 } else {
                     client.buffer.append(recv_buffer, static_cast<std::size_t>(n));
-                    keep = process_buffer(client, fds[0].fd, clients);
+                    keep = process_buffer(client, clients, rooms);
                 }
             }
 
