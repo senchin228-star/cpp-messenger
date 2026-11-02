@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wiretalk Messenger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ================= Экран входа ================= -->
+  <div id="loginScreen" class="screen">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="logo-circle">💬</div>
+        <h1>Wiretalk</h1>
+        <p class="subtitle">Клиент для C++ TCP-мессенджера</p>
+      </div>
+
+      <form id="loginForm">
+        <div class="form-group">
+          <label for="inputUsername">Ваш никнейм</label>
+          <input
+            type="text"
+            id="inputUsername"
+            placeholder="до 16 символов (например, dima)"
+            maxlength="16"
+            required
+            autocomplete="off"
+            autofocus
+          >
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-2">
+            <label for="inputHost">Сервер (IP / Host)</label>
+            <input type="text" id="inputHost" value="127.0.0.1" required>
+          </div>
+          <div class="form-group flex-1">
+            <label for="inputPort">Порт</label>
+            <input type="number" id="inputPort" value="5050" required>
+          </div>
+        </div>
+
+        <div id="loginError" class="error-banner hidden"></div>
+
+        <button type="submit" id="btnLogin" class="btn btn-primary btn-block">
+          Подключиться
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ================= Главный экран мессенджера ================= -->
+  <div id="chatScreen" class="screen hidden">
+    <!-- Боковая панель -->
+    <aside class="sidebar">
+      <!-- Профиль текущего пользователя -->
+      <div class="user-profile">
+        <div class="avatar" id="myAvatar">U</div>
+        <div class="user-info">
+          <span class="my-nickname" id="myNickname">@username</span>
+          <span class="user-status"><span class="status-dot"></span> В сети</span>
+        </div>
+        <button id="btnDisconnect" class="btn-icon" title="Отключиться" aria-label="Отключиться">
+          🚪
+        </button>
+      </div>
+
+      <!-- Секция комнат -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span class="section-title">Комнаты</span>
+          <button id="btnOpenJoinModal" class="btn-action" title="Войти в комнату">+</button>
+        </div>
+        <div id="roomsList" class="nav-list">
+          <!-- Динамический список комнат: # general и др. -->
+        </div>
+      </div>
+
+      <!-- Секция личных сообщений -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span class="section-title">Личные сообщения</span>
+          <button id="btnOpenPrivateModal" class="btn-action" title="Написать лично">+</button>
+        </div>
+        <div id="privateList" class="nav-list">
+          <!-- Динамический список пользователей в ЛС -->
+        </div>
+      </div>
+
+      <!-- Пользователи онлайн -->
+      <div class="sidebar-section online-section">
+        <div class="section-header">
+          <span class="section-title">Онлайн (<span id="onlineCount">0</span>)</span>
+        </div>
+        <div id="onlineUsersList" class="nav-list small-list">
+          <!-- Список пользователей онлайн -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Основная область чата -->
+    <main class="chat-main">
+      <!-- Шапка активного чата -->
+      <header class="chat-header">
+        <div class="chat-header-info">
+          <span class="chat-icon" id="currentChatIcon">#</span>
+          <div>
+            <h2 id="currentChatTitle">general</h2>
+            <p id="currentChatSubtitle" class="chat-subtitle">Общая комната</p>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button id="btnLeaveRoom" class="btn btn-sm btn-danger hidden">
+            Покинуть комнату
+          </button>
+        </div>
+      </header>
+
+      <!-- Лента сообщений -->
+      <div id="messagesContainer" class="messages-container">
+        <div id="messagesList" class="messages-list">
+          <!-- Сообщения добавляются сюда -->
+        </div>
+      </div>
+
+      <!-- Панель ввода сообщения -->
+      <footer class="chat-input-bar">
+        <form id="messageForm" class="input-form">
+          <input
+            type="text"
+            id="inputMessage"
+            placeholder="Напишите сообщение... (Enter для отправки)"
+            autocomplete="off"
+            required
+          >
+          <button type="submit" id="btnSend" class="btn btn-primary btn-send">
+            <span>Отправить</span> ➤
+          </button>
+        </form>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Модальное окно: Войти в комнату -->
+  <div id="modalJoinRoom" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Войти в комнату</h3>
+      <p class="modal-desc">Введите название комнаты (например: <code>dev</code>, <code>games</code>):</p>
+      <form id="formJoinRoom">
+        <input
+          type="text"
+          id="inputRoomName"
+          placeholder="Название комнаты"
+          maxlength="64"
+          required
+        >
+        <div class="modal-buttons">
+          <button type="button" class="btn btn-secondary" id="btnCloseJoinModal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Войти</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Модальное окно: Написать лично -->
+  <div id="modalPrivate" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h3>Личное сообщение</h3>
+      <p class="modal-desc">Введите никнейм пользователя:</p>
+      <form id="formPrivate">
+        <input
+          type="text"
+          id="inputPrivateRecipient"
+          placeholder="Никнейм (например: vova)"
+          maxlength="16"
+          required
+        >
+        <div class="modal-buttons">
+          <button type="button" class="btn btn-secondary" id="btnClosePrivateModal">Отмена</button>
+          <button type="submit" class="btn btn-primary">Начать диалог</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

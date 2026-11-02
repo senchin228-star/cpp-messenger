@@ -21,7 +21,7 @@ std::string trim(const std::string& str) {
     auto last = str.find_last_not_of(" \t\n\r");
     return str.substr(first, last - first + 1);
 }
-bool handle_server_data(std::string& buffer)
+bool handle_server_data(std::string& buffer, const std::string& my_nick = "")
 {
     std::size_t pos;
     while ((pos = buffer.find('\n')) != std::string::npos){
@@ -32,7 +32,10 @@ bool handle_server_data(std::string& buffer)
             std::string type = j.at("type").get<std::string>();
             if (type.empty()) continue;
             if (type == "text" && j.contains("nickname")){
-                std::cout << "[" << j.at("room").get<std::string>() << "] "
+                std::string time_str = j.contains("time") ? ("[" + j.at("time").get<std::string>() + "] ") : "";
+                std::string hist_mark = j.value("history", false) ? "(история) " : "";
+                std::cout << hist_mark << time_str
+                          << "[" << j.at("room").get<std::string>() << "] "
                           << j.at("nickname").get<std::string>() << ": "
                           << j.at("message").get<std::string>() << std::endl;
             }
@@ -41,8 +44,17 @@ bool handle_server_data(std::string& buffer)
                           << j.at("message").get<std::string>() << std::endl;
             }
             else if (type == "private") {
-                std::cout << "Private from " << j.at("from").get<std::string>()
-                          << ": " << j.at("message").get<std::string>() << std::endl;
+                std::string time_str = j.contains("time") ? ("[" + j.at("time").get<std::string>() + "] ") : "";
+                std::string hist_mark = j.value("history", false) ? "(история) " : "";
+                std::string from = j.at("from").get<std::string>();
+                std::string to = j.value("to", "");
+                if (!my_nick.empty() && from == my_nick && !to.empty()) {
+                    std::cout << hist_mark << time_str << "Private to " << to
+                              << ": " << j.at("message").get<std::string>() << std::endl;
+                } else {
+                    std::cout << hist_mark << time_str << "Private from " << from
+                              << ": " << j.at("message").get<std::string>() << std::endl;
+                }
             }
             else if (type == "login_result"){
                 if (j.at("ok").get<bool>()){
@@ -120,7 +132,7 @@ int main(int argc, char *argv[]){
         }
         buffer.append(recv_buffer, static_cast<std::size_t>(n));
     }
-    if (!handle_server_data(buffer)) return 1;
+    if (!handle_server_data(buffer, argv[1])) return 1;
 
     std::string input;
     std::string current_room = "general";
@@ -147,7 +159,7 @@ int main(int argc, char *argv[]){
                 break;
             }
             buffer.append(recv_buffer, static_cast<std::size_t>(n));
-            handle_server_data(buffer);
+            handle_server_data(buffer, argv[1]);
         }
         if (fds[0].revents  & POLLIN){
             if (!std::getline(std::cin, input)) break;

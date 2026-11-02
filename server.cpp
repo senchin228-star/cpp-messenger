@@ -1,5 +1,6 @@
 #include <string>
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <map>
 #include <set>
@@ -13,11 +14,38 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include "socket.hpp"
 #include "net.hpp"
 
-constexpr std::size_t MAX_BUFFER = 4096;
+constexpr std::size_t MAX_BUFFER = 10 * 1024 * 1024; // 10 MB
 constexpr auto LOGIN_TIMEOUT = std::chrono::milliseconds(1000);
+constexpr const char* HISTORY_FILE = "messages.json";
+constexpr std::size_t MAX_ROOM_HISTORY = 200;
+constexpr std::size_t MAX_PRIVATE_HISTORY = 500;
+
+// Структура для долговременного хранения истории сообщений мессенджера
+struct ServerHistory {
+    uint64_t next_id = 1;                              // Уникальный ID для каждого сообщения
+    std::set<std::string> known_users;                // Все пользователи, когда-либо входившие на сервер (в нижнем регистре)
+    std::map<std::string, std::vector<nlohmann::json>> rooms; // История по комнатам (room -> массив сообщений)
+    std::vector<nlohmann::json> privates;              // История личных сообщений (from, to, message, time, id)
+};
+
+// Функция получения текущего времени в формате "ЧЧ:ММ"
+std::string get_current_time_str() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+    localtime_r(&now_time, &tm_buf);
+    std::ostringstream oss;
+    oss << std::setfill('0') << std::setw(2) << tm_buf.tm_hour << ":"
+        << std::setfill('0') << std::setw(2) << tm_buf.tm_min;
+    return oss.str();
+}
 
 std::string lowercase(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -35,6 +63,99 @@ std::string trim(std::string& str) {
     auto last = str.find_last_not_of(" \t\n\r");
     str = str.substr(first, last - first + 1);
     return str;
+}
+
+// Загрузка сохраненной истории из JSON файла при запуске сервера
+void load_history(const std::string& path, ServerHistory& hist) {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        std::cout << "Файл истории не найден (" << path << "), будет создан при новых сообщениях." << std::endl;
+        return;
+    }
+    try {
+        nlohmann::json j;
+        f >> j;
+        if (j.contains("users") && j["users"].is_array()) {
+            for (const auto& u : j["users"]) {
+                if (u.is_string()) hist.known_users.insert(lowercase(u.get<std::string>()));
+            }
+        }
+        if (j.contains("rooms") && j["rooms"].is_object()) {
+            for (auto it = j["rooms"].begin(); it != j["rooms"].end(); ++it) {
+                if (it.value().is_array()) {
+                    for (const auto& msg : it.value()) {
+                        hist.rooms[it.key()].push_back(msg);
+                        if (msg.contains("id") && msg["id"].is_number_unsigned()) {
+                            hist.next_id = std::max(hist.next_id, msg["id"].get<uint64_t>() + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if (j.contains("privates") && j["privates"].is_array()) {
+            for (const auto& msg : j["privates"]) {
+                hist.privates.push_back(msg);
+                if (msg.contains("id") && msg["id"].is_number_unsigned()) {
+                    hist.next_id = std::max(hist.next_id, msg["id"].get<uint64_t>() + 1);
+                }
+            }
+        }
+        std::cout << "Успешно загружена история: "
+                  << hist.rooms.size() << " комнат(ы), "
+                  << hist.privates.size() << " личных сообщений, "
+                  << hist.known_users.size() << " известных пользователей." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Ошибка при чтении файла истории " << path << ": " << e.what() << std::endl;
+    }
+}
+
+// Сохранение всей текущей истории в JSON файл
+void save_history(const std::string& path, const ServerHistory& hist) {
+    try {
+        nlohmann::json j;
+        j["users"] = hist.known_users;
+        j["rooms"] = hist.rooms;
+        j["privates"] = hist.privates;
+        std::ofstream f(path);
+        if (f.is_open()) {
+            f << j.dump(2) << std::endl;
+        } else {
+            std::cerr << "Не удалось открыть файл для записи: " << path << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Исключение при сохранении истории: " << e.what() << std::endl;
+    }
+}
+
+// Отправка клиенту сохраненных сообщений комнаты
+bool send_room_history(int client_fd, const std::string& room, const ServerHistory& hist) {
+    auto it = hist.rooms.find(room);
+    if (it == hist.rooms.end()) return true;
+    for (const auto& msg : it->second) {
+        nlohmann::json hist_msg = msg;
+        hist_msg["history"] = true;
+        if (!send_all(client_fd, hist_msg.dump() + '\n')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Отправка клиенту сохраненных личных сообщений (входящих и исходящих)
+bool send_private_history(int client_fd, const std::string& username, const ServerHistory& hist) {
+    const std::string user_lower = lowercase(username);
+    for (const auto& msg : hist.privates) {
+        std::string from = msg.value("from", "");
+        std::string to = msg.value("to", "");
+        if (lowercase(from) == user_lower || lowercase(to) == user_lower) {
+            nlohmann::json hist_msg = msg;
+            hist_msg["history"] = true;
+            if (!send_all(client_fd, hist_msg.dump() + '\n')) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 using RoomMembers = std::map<std::string, std::set<std::string>>;
@@ -62,7 +183,7 @@ void send_system(const RoomMembers& rooms, const std::map<int, Client>& clients,
     broadcast(rooms, clients, room, event.dump() + '\n');
 }
 
-bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMembers& rooms) {
+bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMembers& rooms, ServerHistory& hist) {
     std::size_t pos;
     while ((pos = client.buffer.find('\n')) != std::string::npos) {
         std::string line = client.buffer.substr(0, pos);
@@ -104,6 +225,16 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     const bool first_join = rooms["general"].insert(user_key).second;
                     if (first_join) send_system(rooms, clients, "general", client.name + " joined");
                     std::cout << username << " Logined" << std::endl;
+
+                    // Добавляем пользователя в список известных (зарегистрированных)
+                    hist.known_users.insert(user_key);
+                    save_history(HISTORY_FILE, hist);
+
+                    // Отправляем клиенту сохраненную историю сообщений общей комнаты general
+                    if (!send_room_history(client.get_sock(), "general", hist)) return false;
+
+                    // Отправляем клиенту сохраненные личные сообщения (где он отправитель или получатель)
+                    if (!send_private_history(client.get_sock(), client.name, hist)) return false;
                 }
             }
             if (client.name.empty()) continue;
@@ -116,6 +247,8 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 }
                 if (rooms[room].insert(lowercase(client.name)).second) {
                     send_system(rooms, clients, room, client.name + " joined");
+                    // Отправляем новому участнику сохраненную историю сообщений этой комнаты
+                    if (!send_room_history(client.get_sock(), room, hist)) return false;
                 }
                 continue;
             }
@@ -143,6 +276,16 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 send_all(client.get_sock(), response.dump() + '\n');
                 continue;
             }
+            if (type == "users") {
+                nlohmann::json response = {{"type", "users"}, {"users", nlohmann::json::array()}};
+                for (const auto& [other_fd, other_client] : clients) {
+                    if (!other_client.name.empty()) {
+                        response["users"].push_back(other_client.name);
+                    }
+                }
+                send_all(client.get_sock(), response.dump() + '\n');
+                continue;
+            }
             if (type == "private") {
                 const std::string recipient_name = j.at("to").get<std::string>();
                 if (recipient_name.empty()) {
@@ -153,12 +296,24 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
+                if (lowercase(recipient_name) == lowercase(client.name)) {
+                    nlohmann::json error {
+                        {"type", "error"},
+                        {"er_text", "Cannot send private message to yourself"}
+                    };
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
                 const std::string private_message = j.at("message").get<std::string>();
                 auto recipient = std::find_if(clients.begin(), clients.end(),
                     [&recipient_name](const auto& entry) {
-                        return entry.second.name == recipient_name;
+                        return lowercase(entry.second.name) == lowercase(recipient_name);
                     });
-                if (recipient == clients.end()) {
+
+                const bool is_online = (recipient != clients.end());
+                const bool is_known = is_online || (hist.known_users.find(lowercase(recipient_name)) != hist.known_users.end());
+
+                if (!is_known) {
                     nlohmann::json error = {
                         {"type", "error"},
                         {"er_text", "User not found: " + recipient_name}
@@ -166,14 +321,30 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
+
+                std::string time_str = get_current_time_str();
                 out = {
                     {"type", "private"},
+                    {"id", hist.next_id++},
                     {"from", client.name},
-                    {"message", private_message}
+                    {"to", recipient_name},
+                    {"message", private_message},
+                    {"time", time_str}
                 };
-                if (!send_all(recipient->first, out.dump() + '\n')) {
-                    std::cerr << "Send private message to " << recipient_name
-                              << " failed: " << strerror(errno) << std::endl;
+
+                // Сохраняем личное сообщение в историю сервера
+                hist.privates.push_back(out);
+                if (hist.privates.size() > MAX_PRIVATE_HISTORY) {
+                    hist.privates.erase(hist.privates.begin());
+                }
+                save_history(HISTORY_FILE, hist);
+
+                // Если получатель онлайн — доставляем в реальном времени
+                if (is_online) {
+                    if (!send_all(recipient->first, out.dump() + '\n')) {
+                        std::cerr << "Send private message to " << recipient_name
+                                  << " failed: " << strerror(errno) << std::endl;
+                    }
                 }
             }
             if (type == "text"){
@@ -185,13 +356,26 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
-                std::cout << "type: " << j.at("type").get<std::string>() + "   "
-                        << client.name << ": "
-                        << j.at("message").get<std::string>() << std::endl;
+
+                std::string time_str = get_current_time_str();
+                std::cout << "[" << time_str << "] [" << room << "] "
+                          << client.name << ": "
+                          << j.at("message").get<std::string>() << std::endl;
+
                 out["type"] = "text";
+                out["id"] = hist.next_id++;
                 out["message"] = j.at("message").get<std::string>();
                 out["nickname"] = client.name;
                 out["room"] = room;
+                out["time"] = time_str;
+
+                // Сохраняем сообщение комнаты в историю на сервере
+                hist.rooms[room].push_back(out);
+                if (hist.rooms[room].size() > MAX_ROOM_HISTORY) {
+                    hist.rooms[room].erase(hist.rooms[room].begin());
+                }
+                save_history(HISTORY_FILE, hist);
+
                 broadcast(rooms, clients, room, out.dump() + "\n");
             }
         } catch (const nlohmann::json::exception& e) {
@@ -236,6 +420,8 @@ int main(){
     fds.push_back({listen_sock.get(), POLLIN, 0});
     std::map<int, Client> clients;
     RoomMembers rooms;
+    ServerHistory history;
+    load_history(HISTORY_FILE, history);
     char recv_buffer[4096];
     
     while (true){
@@ -265,7 +451,7 @@ int main(){
                 continue;
             }
             int fd = client_sock.get();
-            clients.emplace(fd, Client{std::move(client_sock), ""});
+            clients.emplace(fd, Client(std::move(client_sock)));
             fds.push_back({fd, POLLIN, 0});
         }
         for (std::size_t i = fds.size(); i-- > 1; ) {
@@ -288,11 +474,28 @@ int main(){
                     keep = false;
                 } else {
                     client.buffer.append(recv_buffer, static_cast<std::size_t>(n));
-                    keep = process_buffer(client, clients, rooms);
+                    keep = process_buffer(client, clients, rooms, history);
                 }
             }
 
             if (!keep) {
+                if (!client.name.empty()) {
+                    const std::string user_key = lowercase(client.name);
+                    for (auto it = rooms.begin(); it != rooms.end(); ) {
+                        if (it->second.erase(user_key) > 0) {
+                            if (!it->second.empty()) {
+                                send_system(rooms, clients, it->first, client.name + " left");
+                                ++it;
+                            } else if (it->first != "general") {
+                                it = rooms.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        } else {
+                            ++it;
+                        }
+                    }
+                }
                 clients.erase(fd);
                 fds.erase(fds.begin() + static_cast<std::ptrdiff_t>(i));
             }
