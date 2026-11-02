@@ -32,6 +32,7 @@ struct ServerHistory {
     uint64_t next_id = 1;                              // Уникальный ID для каждого сообщения
     std::set<std::string> known_users;                // Все пользователи, когда-либо входившие на сервер (в нижнем регистре)
     std::map<std::string, std::vector<nlohmann::json>> rooms; // История по комнатам (room -> массив сообщений)
+    std::map<std::string, std::set<std::string>> users_rooms; // Пользователи и комнаты, в которых они находятся (user -> set<room>)
     std::vector<nlohmann::json> privates;              // История личных сообщений (from, to, message, time, id)
 };
 
@@ -228,11 +229,14 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
 
                     // Добавляем пользователя в список известных (зарегистрированных)
                     hist.known_users.insert(user_key);
+                    hist.users_rooms[user_key].insert("general");
                     save_history(HISTORY_FILE, hist);
 
-                    // Отправляем клиенту сохраненную историю сообщений общей комнаты general
-                    if (!send_room_history(client.get_sock(), "general", hist)) return false;
-
+                    for (const auto& room : hist.users_rooms[user_key]) {
+                        // Отправляем клиенту сохраненную историю сообщений каждой комнаты, в которой он состоит
+                        if (rooms.find(room) == rooms.end()) continue; // Пропускаем комнаты, которые больше не существуют
+                        if (!send_room_history(client.get_sock(), room, hist)) return false;
+                    }
                     // Отправляем клиенту сохраненные личные сообщения (где он отправитель или получатель)
                     if (!send_private_history(client.get_sock(), client.name, hist)) return false;
                 }
@@ -250,21 +254,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     // Отправляем новому участнику сохраненную историю сообщений этой комнаты
                     if (!send_room_history(client.get_sock(), room, hist)) return false;
                 }
-                continue;
-            }
-            if (type == "leave") {
-                const std::string room = j.at("room").get<std::string>();
-                auto room_it = rooms.find(room);
-                if (room_it == rooms.end() || room_it->second.erase(lowercase(client.name)) == 0) {
-                    nlohmann::json error = {{"type", "error"}, {"er_text", "You are not in room: " + room}};
-                    send_all(client.get_sock(), error.dump() + '\n');
-                    continue;
-                }
-                if (!room_it->second.empty()) {
-                    send_system(rooms, clients, room, client.name + " left");
-                } else {
-                    rooms.erase(room_it);
-                }
+                hist.users_rooms[lowercase(client.name)].insert(room);
                 continue;
             }
             if (type == "rooms") {
@@ -304,15 +294,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
-                const std::string private_message = j.value("message", "");
-                if (private_message.empty() && !j.contains("image")) {
-                    nlohmann::json error {
-                        {"type", "error"},
-                        {"er_text", "Empty message"}
-                    };
-                    send_all(client.get_sock(), error.dump() + '\n');
-                    continue;
-                }
+                const std::string private_message = j.at("message").get<std::string>();
                 auto recipient = std::find_if(clients.begin(), clients.end(),
                     [&recipient_name](const auto& entry) {
                         return lowercase(entry.second.name) == lowercase(recipient_name);
@@ -358,6 +340,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                                   << " failed: " << strerror(errno) << std::endl;
                     }
                 }
+                continue;
             }
             if (type == "message"  || type == "text" || type == "image") {
                 const std::string room = j.at("room").get<std::string>();
@@ -368,10 +351,8 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
-
-                std::string message_text = j.value("message", "");
-                if (message_text.empty() && !j.contains("image")) {
-                    nlohmann::json error = {{"type", "error"}, {"er_text", "Empty message"}};
+                if (hist.known_users.find(user_key) == hist.known_users.end()) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "User not registered: " + client.name}};
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
@@ -379,12 +360,11 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 std::string time_str = get_current_time_str();
                 std::cout << "[" << time_str << "] [" << room << "] "
                           << client.name << ": "
-                          << (j.contains("image") ? "[📷 Photo] " : "")
-                          << message_text << std::endl;
+                          << j.at("message").get<std::string>() << std::endl;
 
                 out["type"] = "text";
                 out["id"] = hist.next_id++;
-                out["message"] = message_text;
+                out["message"] = j.at("message").get<std::string>();
                 out["nickname"] = client.name;
                 out["room"] = room;
                 out["time"] = time_str;
@@ -400,6 +380,40 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 save_history(HISTORY_FILE, hist);
 
                 broadcast(rooms, clients, room, out.dump() + "\n");
+                continue;
+            }
+
+            if (type == "leave"){
+                const std::string room = j.at("room").get<std::string>();
+                const std::string user_key = lowercase(client.name);
+                auto room_it = rooms.find(room);
+                if (room_it == rooms.end() || room_it->second.count(user_key) == 0) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "Join room before sending: " + room}};
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
+                std::string time_str = get_current_time_str();
+                std::cout << "[" << time_str << "] [" << room << "] "
+                          << client.name << " left the room." << std::endl;
+
+                rooms[room].erase(user_key);
+                hist.users_rooms[user_key].erase(room);
+                nlohmann::json out = {
+                    {"type", "leave"},
+                    {"user", user_key},
+                    {"room", room},
+                    {"time", time_str}
+                };
+
+                send_system(rooms, clients, room, client.name + " left");
+                hist.rooms[room].push_back(out);
+                if (hist.rooms[room].size() > MAX_ROOM_HISTORY) {
+                    hist.rooms[room].erase(hist.rooms[room].begin());
+                }
+                save_history(HISTORY_FILE, hist);
+
+                broadcast(rooms, clients, room, out.dump() + "\n");
+                continue;
             }
         } catch (const nlohmann::json::exception& e) {
             std::cerr << "Bad message: " << e.what() << std::endl;
@@ -445,7 +459,7 @@ int main(){
     RoomMembers rooms;
     ServerHistory history;
     load_history(HISTORY_FILE, history);
-    char recv_buffer[65536];
+    char recv_buffer[4096];
     
     while (true){
         int poll_timeout = -1;
@@ -502,23 +516,6 @@ int main(){
             }
 
             if (!keep) {
-                if (!client.name.empty()) {
-                    const std::string user_key = lowercase(client.name);
-                    for (auto it = rooms.begin(); it != rooms.end(); ) {
-                        if (it->second.erase(user_key) > 0) {
-                            if (!it->second.empty()) {
-                                send_system(rooms, clients, it->first, client.name + " left");
-                                ++it;
-                            } else if (it->first != "general") {
-                                it = rooms.erase(it);
-                            } else {
-                                ++it;
-                            }
-                        } else {
-                            ++it;
-                        }
-                    }
-                }
                 clients.erase(fd);
                 fds.erase(fds.begin() + static_cast<std::ptrdiff_t>(i));
             }
