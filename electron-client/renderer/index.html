@@ -126,13 +126,28 @@
 
       <!-- Панель ввода сообщения -->
       <footer class="chat-input-bar">
+        <!-- Предпросмотр прикреплённого изображения -->
+        <div id="imagePreviewBar" class="image-preview-bar hidden">
+          <div class="image-preview-card">
+            <img id="imagePreviewImg" src="" alt="Предпросмотр фото" />
+            <div class="image-preview-info">
+              <span id="imagePreviewName" class="image-preview-name">photo.png</span>
+              <span id="imagePreviewDimensions" class="image-preview-dims"></span>
+            </div>
+            <button type="button" id="btnCancelImage" class="btn-cancel-image" title="Удалить фото">✕</button>
+          </div>
+        </div>
+
         <form id="messageForm" class="input-form">
+          <input type="file" id="fileInput" accept="image/*" class="hidden">
+          <button type="button" id="btnAttachImage" class="btn-attach" title="Прикрепить изображение (или Ctrl+V)">
+            📷
+          </button>
           <input
             type="text"
             id="inputMessage"
             placeholder="Напишите сообщение... (Enter для отправки)"
             autocomplete="off"
-            required
           >
           <button type="submit" id="btnSend" class="btn btn-primary btn-send">
             <span>Отправить</span> ➤
@@ -140,6 +155,24 @@
         </form>
       </footer>
     </main>
+  </div>
+
+  <!-- Оверлей Drag-and-Drop для перетаскивания картинок -->
+  <div id="dragDropOverlay" class="drag-drop-overlay hidden">
+    <div class="drag-drop-card">
+      <div class="drag-drop-icon">📸</div>
+      <div class="drag-drop-text">Перетащите изображение сюда для прикрепления</div>
+    </div>
+  </div>
+
+  <!-- Модальное окно просмотра изображения на весь экран (Lightbox) -->
+  <div id="modalLightbox" class="modal-lightbox hidden">
+    <div class="lightbox-backdrop" id="lightboxBackdrop"></div>
+    <div class="lightbox-dialog">
+      <button type="button" class="lightbox-close" id="btnCloseLightbox" title="Закрыть (Esc)">✕</button>
+      <img id="lightboxImage" src="" alt="Просмотр фото" />
+      <div id="lightboxCaption" class="lightbox-caption"></div>
+    </div>
   </div>
 
   <!-- Модальное окно: Войти в комнату -->

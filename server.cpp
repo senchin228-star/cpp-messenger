@@ -304,7 +304,15 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
-                const std::string private_message = j.at("message").get<std::string>();
+                const std::string private_message = j.value("message", "");
+                if (private_message.empty() && !j.contains("image")) {
+                    nlohmann::json error {
+                        {"type", "error"},
+                        {"er_text", "Empty message"}
+                    };
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
                 auto recipient = std::find_if(clients.begin(), clients.end(),
                     [&recipient_name](const auto& entry) {
                         return lowercase(entry.second.name) == lowercase(recipient_name);
@@ -323,6 +331,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 }
 
                 std::string time_str = get_current_time_str();
+
                 out = {
                     {"type", "private"},
                     {"id", hist.next_id++},
@@ -331,6 +340,9 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     {"message", private_message},
                     {"time", time_str}
                 };
+                if (j.contains("image")) {
+                    out["image"] = j.at("image");
+                }
 
                 // Сохраняем личное сообщение в историю сервера
                 hist.privates.push_back(out);
@@ -347,7 +359,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     }
                 }
             }
-            if (type == "text"){
+            if (type == "message"  || type == "text" || type == "image") {
                 const std::string room = j.at("room").get<std::string>();
                 const std::string user_key = lowercase(client.name);
                 auto room_it = rooms.find(room);
@@ -357,17 +369,28 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     continue;
                 }
 
+                std::string message_text = j.value("message", "");
+                if (message_text.empty() && !j.contains("image")) {
+                    nlohmann::json error = {{"type", "error"}, {"er_text", "Empty message"}};
+                    send_all(client.get_sock(), error.dump() + '\n');
+                    continue;
+                }
+
                 std::string time_str = get_current_time_str();
                 std::cout << "[" << time_str << "] [" << room << "] "
                           << client.name << ": "
-                          << j.at("message").get<std::string>() << std::endl;
+                          << (j.contains("image") ? "[📷 Photo] " : "")
+                          << message_text << std::endl;
 
                 out["type"] = "text";
                 out["id"] = hist.next_id++;
-                out["message"] = j.at("message").get<std::string>();
+                out["message"] = message_text;
                 out["nickname"] = client.name;
                 out["room"] = room;
                 out["time"] = time_str;
+                if (j.contains("image")) {
+                    out["image"] = j.at("image");
+                }
 
                 // Сохраняем сообщение комнаты в историю на сервере
                 hist.rooms[room].push_back(out);
@@ -422,7 +445,7 @@ int main(){
     RoomMembers rooms;
     ServerHistory history;
     load_history(HISTORY_FILE, history);
-    char recv_buffer[4096];
+    char recv_buffer[65536];
     
     while (true){
         int poll_timeout = -1;

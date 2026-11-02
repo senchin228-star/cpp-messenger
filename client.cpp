@@ -34,10 +34,12 @@ bool handle_server_data(std::string& buffer, const std::string& my_nick = "")
             if (type == "text" && j.contains("nickname")){
                 std::string time_str = j.contains("time") ? ("[" + j.at("time").get<std::string>() + "] ") : "";
                 std::string hist_mark = j.value("history", false) ? "(история) " : "";
+                std::string img_mark = j.contains("image") ? "[📷 Фото] " : "";
+                std::string msg_text = j.value("message", "");
                 std::cout << hist_mark << time_str
                           << "[" << j.at("room").get<std::string>() << "] "
                           << j.at("nickname").get<std::string>() << ": "
-                          << j.at("message").get<std::string>() << std::endl;
+                          << img_mark << msg_text << std::endl;
             }
             else if (type == "system") {
                 std::cout << "[" << j.value("room", std::string{}) << "] "
@@ -46,14 +48,16 @@ bool handle_server_data(std::string& buffer, const std::string& my_nick = "")
             else if (type == "private") {
                 std::string time_str = j.contains("time") ? ("[" + j.at("time").get<std::string>() + "] ") : "";
                 std::string hist_mark = j.value("history", false) ? "(история) " : "";
+                std::string img_mark = j.contains("image") ? "[📷 Фото] " : "";
+                std::string msg_text = j.value("message", "");
                 std::string from = j.at("from").get<std::string>();
                 std::string to = j.value("to", "");
                 if (!my_nick.empty() && from == my_nick && !to.empty()) {
                     std::cout << hist_mark << time_str << "Private to " << to
-                              << ": " << j.at("message").get<std::string>() << std::endl;
+                              << ": " << img_mark << msg_text << std::endl;
                 } else {
                     std::cout << hist_mark << time_str << "Private from " << from
-                              << ": " << j.at("message").get<std::string>() << std::endl;
+                              << ": " << img_mark << msg_text << std::endl;
                 }
             }
             else if (type == "login_result"){

@@ -35,12 +35,16 @@ const state = {
 
   // Хранилище сообщений текущей сессии в оперативной памяти:
   // Ключ: "room:general" или "private:dima"
-  // Значение: массив объектов сообщений { id, sender, text, time, type: 'text'|'system'|'error', isMine: bool }
+  // Значение: массив объектов сообщений { id, sender, text, image, time, type: 'text'|'system'|'error', isMine: bool }
   messages: new Map(),
 
   // Счётчики непрочитанных сообщений:
   // Ключ: "room:name" или "private:name" -> число
   unreads: new Map(),
+
+  // Текущее прикреплённое изображение:
+  // { dataUrl: string, name: string, width: number, height: number, size: number } | null
+  attachedImage: null,
 };
 
 // ============================================================
@@ -96,6 +100,25 @@ const dom = {
   messageForm: document.getElementById('messageForm'),
   inputMessage: document.getElementById('inputMessage'),
   btnSend: document.getElementById('btnSend'),
+
+  // Прикрепление фото и предпросмотр
+  fileInput: document.getElementById('fileInput'),
+  btnAttachImage: document.getElementById('btnAttachImage'),
+  imagePreviewBar: document.getElementById('imagePreviewBar'),
+  imagePreviewImg: document.getElementById('imagePreviewImg'),
+  imagePreviewName: document.getElementById('imagePreviewName'),
+  imagePreviewDimensions: document.getElementById('imagePreviewDimensions'),
+  btnCancelImage: document.getElementById('btnCancelImage'),
+
+  // Drag and drop overlay
+  dragDropOverlay: document.getElementById('dragDropOverlay'),
+
+  // Lightbox просмотр фото
+  modalLightbox: document.getElementById('modalLightbox'),
+  lightboxBackdrop: document.getElementById('lightboxBackdrop'),
+  lightboxImage: document.getElementById('lightboxImage'),
+  lightboxCaption: document.getElementById('lightboxCaption'),
+  btnCloseLightbox: document.getElementById('btnCloseLightbox'),
 };
 
 // ============================================================
@@ -195,6 +218,37 @@ function setupEventListeners() {
       leaveRoom(state.activeChat.id);
     }
   });
+
+  // Выбор изображения через кнопку-скрепку / камеру
+  dom.btnAttachImage.addEventListener('click', () => {
+    dom.fileInput.click();
+  });
+
+  dom.fileInput.addEventListener('change', (e) => {
+    if (e.target.files && e.target.files[0]) {
+      processImageFile(e.target.files[0]);
+    }
+  });
+
+  // Удаление прикреплённого изображения
+  dom.btnCancelImage.addEventListener('click', () => {
+    clearAttachedImage();
+  });
+
+  // Просмотр полноразмерного фото (Lightbox)
+  dom.btnCloseLightbox.addEventListener('click', closeLightbox);
+  dom.lightboxBackdrop.addEventListener('click', closeLightbox);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLightbox();
+  });
+
+  // Вставка фото из буфера обмена (Ctrl + V)
+  document.addEventListener('paste', handlePasteEvent);
+
+  // Перетаскивание файлов (Drag and drop)
+  window.addEventListener('dragover', handleDragOver);
+  window.addEventListener('dragleave', handleDragLeave);
+  window.addEventListener('drop', handleDrop);
 }
 
 // ============================================================
@@ -288,14 +342,16 @@ function handleServerMessage(msg) {
 
   switch (type) {
     case 'text':
+    case 'message':
+    case 'image':
       // Групповое сообщение в комнату:
-      // { type: "text", nickname: "dima", room: "general", message: "Привет" }
+      // { type: "text", nickname: "dima", room: "general", message: "Привет", image?: "..." }
       onTextMessage(msg);
       break;
 
     case 'private':
       // Личное сообщение:
-      // { type: "private", from: "vova", message: "Секретно" }
+      // { type: "private", from: "vova", message: "Секретно", image?: "..." }
       onPrivateMessage(msg);
       break;
 
@@ -353,7 +409,8 @@ function onTextMessage(msg) {
     id: msg.id || (Date.now() + Math.random()),
     msgId: msg.id,
     sender: msg.nickname,
-    text: msg.message,
+    text: msg.message || '',
+    image: msg.image || null,
     time: msg.time || formatTime(),
     type: 'text',
     isMine: isMine,
@@ -394,7 +451,8 @@ function onPrivateMessage(msg) {
     id: msg.id || (Date.now() + Math.random()),
     msgId: msg.id,
     sender: msg.from,
-    text: msg.message,
+    text: msg.message || '',
+    image: msg.image || null,
     time: msg.time || formatTime(),
     type: 'text',
     isMine: isMine,
@@ -471,7 +529,10 @@ function onErrorMessage(msg) {
 
 function sendMessage() {
   const text = dom.inputMessage.value.trim();
-  if (!text) return;
+  const image = state.attachedImage ? state.attachedImage.dataUrl : null;
+
+  // Не отправляем абсолютно пустое сообщение без текста и без картинки
+  if (!text && !image) return;
 
   if (state.activeChat.type === 'room') {
     // Отправка в текущую комнату
@@ -480,10 +541,14 @@ function sendMessage() {
       room: state.activeChat.id,
       message: text,
     };
+    if (image) {
+      payload.image = image;
+    }
     window.api.send(payload);
 
-    // Очищаем поле ввода. Сам сервер сделает broadcast обратно нам!
+    // Очищаем поле ввода и сбрасываем прикрепленное изображение
     dom.inputMessage.value = '';
+    clearAttachedImage();
   } else if (state.activeChat.type === 'private') {
     // Отправка в ЛС
     const recipient = state.activeChat.id;
@@ -492,14 +557,18 @@ function sendMessage() {
       to: recipient,
       message: text,
     };
+    if (image) {
+      payload.image = image;
+    }
     window.api.send(payload);
 
     // Поскольку сервер отправляет private-сообщение только получателю,
-    // отправитель должен сразу зафиксировать его у себя локально:
+    // отправитель сразу фиксирует его у себя локально:
     const myMsg = {
       id: Date.now() + Math.random(),
       sender: state.myUsername,
       text: text,
+      image: image,
       time: formatTime(),
       type: 'text',
       isMine: true,
@@ -511,6 +580,7 @@ function sendMessage() {
     scrollToBottom();
 
     dom.inputMessage.value = '';
+    clearAttachedImage();
   }
 }
 
@@ -690,7 +760,40 @@ function appendMessageToView(m) {
 
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
-  bubble.textContent = m.text;
+
+  // Если прикреплено изображение
+  if (m.image) {
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'msg-image-wrap';
+    imgWrap.title = 'Нажмите, чтобы открыть фото на весь экран';
+
+    const img = document.createElement('img');
+    img.className = 'msg-image';
+    const src = m.image.startsWith('data:') ? m.image : `data:image/png;base64,${m.image}`;
+    img.src = src;
+    img.alt = 'Фото';
+    img.loading = 'lazy';
+
+    imgWrap.appendChild(img);
+
+    imgWrap.addEventListener('click', () => {
+      openLightbox(src, m.text || '');
+    });
+
+    bubble.appendChild(imgWrap);
+  }
+
+  // Текстовая подпись или обычное сообщение
+  if (m.text) {
+    if (m.image) {
+      const caption = document.createElement('div');
+      caption.className = 'msg-caption';
+      caption.textContent = m.text;
+      bubble.appendChild(caption);
+    } else {
+      bubble.textContent = m.text;
+    }
+  }
 
   row.appendChild(meta);
   row.appendChild(bubble);
@@ -799,4 +902,179 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ============================================================
+// 9. РАБОТА С ФОТО (ЧТЕНИЕ, ОПТИМИЗАЦИЯ BASE64, LIGHTBOX, DRAG-N-DROP)
+// ============================================================
+
+/**
+ * Чтение файла изображения и конвертация в base64 (DataURL) с умной оптимизацией
+ */
+function processImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    alert('Пожалуйста, выберите файл изображения (PNG, JPG, WebP, GIF)');
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const rawDataUrl = e.target.result;
+
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 1600;
+      let width = img.width;
+      let height = img.height;
+
+      // Если изображение слишком большое (например 4K/8K или файл > 1.5 МБ),
+      // оптимизируем размер через canvas, сохраняя превосходное качество
+      if (width > maxDim || height > maxDim || file.size > 1.5 * 1024 * 1024) {
+        if (width > height) {
+          if (width > maxDim) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          }
+        } else {
+          if (height > maxDim) {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        setAttachedImage({
+          dataUrl: optimizedDataUrl,
+          name: file.name || 'photo.jpg',
+          width,
+          height,
+          size: Math.round((optimizedDataUrl.length * 3) / 4),
+        });
+      } else {
+        // Оставляем исходный base64
+        setAttachedImage({
+          dataUrl: rawDataUrl,
+          name: file.name || 'photo.png',
+          width,
+          height,
+          size: file.size,
+        });
+      }
+    };
+    img.src = rawDataUrl;
+  };
+  reader.readAsDataURL(file);
+}
+
+/**
+ * Установка прикрепленного изображения в состояние и отображение превью
+ */
+function setAttachedImage(imgData) {
+  state.attachedImage = imgData;
+  dom.imagePreviewImg.src = imgData.dataUrl;
+  dom.imagePreviewName.textContent = imgData.name;
+  const sizeKb = Math.round(imgData.size / 1024);
+  dom.imagePreviewDimensions.textContent = `${imgData.width}×${imgData.height} px (${sizeKb} KB)`;
+  dom.imagePreviewBar.classList.remove('hidden');
+  dom.inputMessage.focus();
+}
+
+/**
+ * Очистка прикреплённого изображения
+ */
+function clearAttachedImage() {
+  state.attachedImage = null;
+  dom.imagePreviewImg.src = '';
+  dom.imagePreviewName.textContent = '';
+  dom.imagePreviewDimensions.textContent = '';
+  dom.imagePreviewBar.classList.add('hidden');
+  dom.fileInput.value = '';
+}
+
+/**
+ * Открытие изображения на весь экран
+ */
+function openLightbox(src, captionText) {
+  dom.lightboxImage.src = src;
+  if (captionText) {
+    dom.lightboxCaption.textContent = captionText;
+    dom.lightboxCaption.classList.remove('hidden');
+  } else {
+    dom.lightboxCaption.textContent = '';
+    dom.lightboxCaption.classList.add('hidden');
+  }
+  dom.modalLightbox.classList.remove('hidden');
+}
+
+/**
+ * Закрытие модального окна просмотра фото
+ */
+function closeLightbox() {
+  dom.modalLightbox.classList.add('hidden');
+  dom.lightboxImage.src = '';
+  dom.lightboxCaption.textContent = '';
+}
+
+/**
+ * Обработка вставки из буфера обмена (Ctrl + V)
+ */
+function handlePasteEvent(e) {
+  // Работает только если находимся на экране чата
+  if (dom.chatScreen.classList.contains('hidden')) return;
+
+  if (!e.clipboardData) return;
+  const items = e.clipboardData.items;
+  if (!items) return;
+
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf('image') !== -1) {
+      const file = items[i].getAsFile();
+      if (file) {
+        processImageFile(file);
+        e.preventDefault();
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Обработчики Drag and Drop
+ */
+function handleDragOver(e) {
+  if (dom.chatScreen.classList.contains('hidden')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+    dom.dragDropOverlay.classList.remove('hidden');
+  }
+}
+
+function handleDragLeave(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  // Скрываем оверлей только если курсор вышел за пределы окна
+  if (e.relatedTarget === null || e.clientX <= 0 || e.clientY <= 0) {
+    dom.dragDropOverlay.classList.add('hidden');
+  }
+}
+
+function handleDrop(e) {
+  if (dom.chatScreen.classList.contains('hidden')) return;
+  e.preventDefault();
+  e.stopPropagation();
+  dom.dragDropOverlay.classList.add('hidden');
+
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    const file = e.dataTransfer.files[0];
+    if (file.type.startsWith('image/')) {
+      processImageFile(file);
+    }
+  }
 }
