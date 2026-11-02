@@ -1,71 +1,158 @@
 # Wiretalk
 
-**A C++ client-server messaging system built with TCP sockets and a custom JSON-based protocol.**
+**A lightweight, high-performance C++ client-server messaging system built with POSIX TCP sockets, non-blocking I/O multiplexing (`poll`), and a custom JSON-based protocol.**
 
-Wiretalk is an individual school project focused on low-level network programming, client-server architecture, and the practical implementation of a messaging system in C++.
+![Wiretalk Interface](assets/screenshot.png)
 
-The project is being developed as part of a school individual project.
+---
 
-## Project Goals
+## Overview
 
-* Understand TCP communication and socket programming.
-* Design and implement a custom application-layer protocol.
-* Build a client-server architecture in C++.
-* Exchange structured messages using JSON.
-* Explore the transmission of images and other binary data.
-* Learn about connection handling, message framing, and reliable data exchange.
+**Wiretalk** is an individual school project focused on low-level systems and network programming. The goal was to build a robust, scalable chat backend from scratch in modern C++, implementing real-world patterns such as RAII, move semantics, non-blocking asynchronous event loops, and structured stream framing.
 
-## Planned Features
+The project features a dedicated C++ server, a C++ CLI client, and a modern cross-platform graphical client powered by Electron.
 
-* [ ] Basic TCP client-server communication
-* [ ] JSON-based text message serialization
-* [ ] Basic message type field
-* [ ] Multiple simultaneous clients
-* [ ] User authentication
-* [ ] Message routing between users
-* [ ] Image transmission
-* [ ] Message history
-* [ ] Secure communication
+---
 
-## Technology Stack
+## Key Features
 
-* **C++** — core implementation
-* **TCP/IP sockets** — network communication
-* **JSON** — message serialization
-* **nlohmann/json** — JSON for Modern C++
+- [x] **Asynchronous I/O Multiplexing:** Powered by Linux `poll()`, allowing the single-threaded server to handle multiple simultaneous clients with virtually zero idle CPU usage.
+- [x] **RAII Socket Management:** Custom move-only `Socket` class ensuring automatic cleanup of file descriptors (`close(fd)`) and preventing descriptor leaks or duplicate ownership.
+- [x] **Stream Framing & Protocol:** Newline-delimited JSON (`\n`) protocol over TCP, properly handling packet fragmentation, partial reads, and batch packet delivery.
+- [x] **Chat Rooms & Channels:** Persistent channel membership (users remain in joined channels across sessions, similar to Telegram/Discord).
+- [x] **Direct / Private Messaging:** 1-on-1 messaging with automatic real-time routing for online users and offline storage.
+- [x] **Image & Photo Transmission:** Support for sending images encoded as Base64 strings directly in the message payload with dynamic buffer handling up to 10 MB.
+- [x] **Persistent Server History:** Automatic persistence of rooms, chat history, registered users, and room memberships to `messages.json`.
+- [x] **Cross-Platform UI:** Modern Electron desktop client and native C++ terminal client.
 
-## Protocol
+---
 
-The initial protocol uses JSON objects to represent application messages.
+## Architecture Highlights
 
-Example:
+```text
+               ┌─────────────────────────────────────┐
+               │         Wiretalk Server (C++)       │
+               │                                     │
+               │   ┌─────────────────────────────┐   │
+               │   │    Linux Event Loop (poll)  │   │
+               │   └──────────────┬──────────────┘   │
+               │                  │                  │
+               │       ┌──────────┴──────────┐       │
+               │       ▼                     ▼       │
+               │  RAII Sockets          Inverted     │
+               │  (move-only)           Index Map    │
+               │                  (user -> channels) │
+               │                                     │
+               │   ┌─────────────────────────────┐   │
+               │   │    JSON Stream Framing      │   │
+               │   └──────────────┬──────────────┘   │
+               └──────────────────┼──────────────────┘
+                                  │ TCP (Port 5050)
+            ┌─────────────────────┴─────────────────────┐
+            ▼                                           ▼
+   ┌─────────────────┐                         ┌─────────────────┐
+   │ Electron Client │                         │  C++ CLI Client │
+   │   (GUI / JS)    │                         │   (Terminal)    │
+   └─────────────────┘                         └─────────────────┘
+```
 
+- **`Socket` wrapper:** Explicit constructor, deleted copy operations (`= delete`), and `noexcept` move semantics preventing double-close bugs.
+- **Inverted Indexing:** Two-way mapping (`rooms` and `users_rooms`) for $O(1)$ fast channel queries during user login.
+- **Resilience:** Sanitized with `-fsanitize=address,undefined` in Debug builds to eliminate memory leaks and undefined behaviors.
+
+---
+
+## Protocol Specification
+
+Wiretalk uses newline-terminated (`\n`) JSON messages over TCP.
+
+### 1. User Authentication
 ```json
+// Client -> Server
+{ "type": "login", "user": "Arseniy" }
+
+// Server -> Client
+{ "type": "login_result", "ok": true, "reason": "" }
+```
+
+### 2. Room Message (Text & Image)
+```json
+// Client -> Server
 {
-  "type": "text",
-  "message": "Hello, world!"
+  "type": "message",
+  "room": "general",
+  "message": "Check out this screenshot!",
+  "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
 }
 ```
 
-The `type` field identifies the kind of message, allowing the protocol to be extended with additional message types in the future.
+### 3. Private Message
+```json
+// Client -> Server
+{
+  "type": "private",
+  "to": "Vova",
+  "message": "Hey, are you online?"
+}
+```
 
-The current prototype uses newline-delimited JSON messages over a TCP connection.
+### 4. Room Management
+```json
+// Join a room
+{ "type": "join", "room": "gaming" }
 
-## Project Structure
+// Leave a room
+{ "type": "leave", "room": "gaming" }
 
-The project is currently in its early development stage. Its structure and protocol may change as new features are implemented.
+// Request list of user's rooms
+{ "type": "rooms" }
+```
+
+---
+
+## Technology Stack
+
+- **Backend:** C++ (C++17/20), POSIX Sockets, Linux `poll()`, `nlohmann/json`
+- **Memory Safety:** RAII idiom, AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan)
+- **Frontend / Client:** Electron, JavaScript, HTML5, CSS3
+- **Build System:** GNU Make, GCC / Clang
+
+---
 
 ## Building and Running
 
-Build instructions will be added as the project develops and its dependencies and build system are finalized.
+### Prerequisites
+- GCC / G++ supporting C++17 or newer
+- GNU Make
+- Node.js & npm (for the Electron client)
+
+### 1. Build the Server & CLI Client
+```bash
+make
+```
+
+### 2. Start the Server
+```bash
+./server
+```
+*The server listens on `0.0.0.0:5050` by default and automatically creates/loads `messages.json`.*
+
+### 3. Run the Electron GUI Client
+```bash
+./run-electron.sh
+```
+
+### 4. Run the Terminal Client (Alternative)
+```bash
+./client
+```
+
+---
 
 ## Academic Context
 
-Wiretalk is being developed as an individual school project focused on the design, development, and practical implementation of a multi-user text messaging system using client-server architecture, low-level network programming in C++, and TCP/IP.
-
-## Status
-
-**Early development — protocol and networking prototype.**
-
-This project is primarily intended for educational purposes. Its architecture and features are subject to change.
-
+Wiretalk is an individual school research and engineering project demonstrating practical knowledge of:
+1. Low-level networking and TCP socket lifecycles.
+2. Resource management (RAII) and move semantics in modern C++.
+3. Event-driven non-blocking I/O architectures (`poll`).
+4. Modern software design combining a high-performance C++ backend with a user-friendly GUI.
