@@ -15,7 +15,8 @@ const net = require('node:net');
 let mainWindow = null;
 let tcpSocket = null;
 let socketBuffer = ''; // Буфер для накопления кусочков TCP-пакетов
-let pendingLoginPromise = null; // Промис для ожидания ответа login_result от сервера
+let pendingAuthPromise = null; // Промис для ожидания ответа login_result / register_result
+let currentCredentials = null; // Сохраненные данные для цепочки register -> login
 
 /**
  * Создание главного окна приложения
@@ -44,14 +45,15 @@ function createWindow() {
 }
 
 /**
- * Подключение к C++ серверу по TCP и отправка логина
+ * Подключение к C++ серверу по TCP и отправка запроса входа или регистрации
  */
-function connectTcp(host, port, username) {
+function connectTcp({ host, port, username, password, action = 'login' }) {
   return new Promise((resolve, reject) => {
     disconnectTcp();
 
     socketBuffer = '';
     tcpSocket = new net.Socket();
+    currentCredentials = { username, password };
 
     let isConnected = false;
 
@@ -63,17 +65,29 @@ function connectTcp(host, port, username) {
       }
     }, 5000);
 
-    tcpSocket.connect(port, host, () => {
+    tcpSocket.connect(Number(port), host, () => {
       isConnected = true;
       clearTimeout(timeout);
 
       // В сервере задан LOGIN_TIMEOUT = 1000мс,
-      // поэтому запрос login отправляем сразу же после установки TCP-соединения!
-      const loginPayload = JSON.stringify({ type: 'login', user: username }) + '\n';
-      tcpSocket.write(loginPayload, 'utf-8');
+      // поэтому запрос отправляем сразу же после установки TCP-соединения!
+      pendingAuthPromise = { resolve, reject };
 
-      // Сохраняем обработчики промиса для ответа 'login_result'
-      pendingLoginPromise = { resolve, reject };
+      if (action === 'register') {
+        const regPayload = JSON.stringify({
+          type: 'register',
+          user: username,
+          password: password || '',
+        }) + '\n';
+        tcpSocket.write(regPayload, 'utf-8');
+      } else {
+        const loginPayload = JSON.stringify({
+          type: 'login',
+          user: username,
+          password: password || '',
+        }) + '\n';
+        tcpSocket.write(loginPayload, 'utf-8');
+      }
     });
 
     // Обработка входящих данных
@@ -99,9 +113,9 @@ function connectTcp(host, port, username) {
 
     tcpSocket.on('error', (err) => {
       console.error('Ошибка TCP сокета:', err.message);
-      if (pendingLoginPromise) {
-        pendingLoginPromise.reject(new Error(`Ошибка подключения: ${err.message}`));
-        pendingLoginPromise = null;
+      if (pendingAuthPromise) {
+        pendingAuthPromise.reject(new Error(`Ошибка подключения: ${err.message}`));
+        pendingAuthPromise = null;
       }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('connection-status', {
@@ -113,9 +127,9 @@ function connectTcp(host, port, username) {
 
     tcpSocket.on('close', () => {
       console.log('TCP сокет закрыт');
-      if (pendingLoginPromise) {
-        pendingLoginPromise.reject(new Error('Сервер разорвал соединение до завершения входа'));
-        pendingLoginPromise = null;
+      if (pendingAuthPromise) {
+        pendingAuthPromise.reject(new Error('Сервер разорвал соединение до завершения авторизации'));
+        pendingAuthPromise = null;
       }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('connection-status', {
@@ -131,15 +145,33 @@ function connectTcp(host, port, username) {
  * Обработка разобранного JSON-сообщения от сервера
  */
 function handleIncomingMessage(msg) {
-  // Если мы ожидали подтверждения входа
-  if (msg.type === 'login_result' && pendingLoginPromise) {
+  // Если мы ожидали подтверждения регистрации:
+  if (msg.type === 'register_result' && pendingAuthPromise) {
     if (msg.ok) {
-      pendingLoginPromise.resolve(msg);
+      // Регистрация успешна! Сразу же отправляем логин на этом же сокете
+      const loginPayload = JSON.stringify({
+        type: 'login',
+        user: currentCredentials.username,
+        password: currentCredentials.password || '',
+      }) + '\n';
+      tcpSocket.write(loginPayload, 'utf-8');
     } else {
-      pendingLoginPromise.reject(new Error(msg.reason || 'Ошибка авторизации'));
+      pendingAuthPromise.reject(new Error(msg.reason || 'Ошибка регистрации'));
+      pendingAuthPromise = null;
       disconnectTcp();
     }
-    pendingLoginPromise = null;
+    return;
+  }
+
+  // Если мы ожидали подтверждения входа:
+  if (msg.type === 'login_result' && pendingAuthPromise) {
+    if (msg.ok) {
+      pendingAuthPromise.resolve(msg);
+    } else {
+      pendingAuthPromise.reject(new Error(msg.reason || 'Ошибка авторизации'));
+      disconnectTcp();
+    }
+    pendingAuthPromise = null;
     return;
   }
 
@@ -176,9 +208,9 @@ function disconnectTcp() {
 // IPC обработчики (вызовы из renderer интерфейса)
 // -------------------------------------------------------------
 
-// Запрос на подключение: invoke('tcp:connect', { host, port, username })
-ipcMain.handle('tcp:connect', async (_event, { host, port, username }) => {
-  return await connectTcp(host, Number(port), username);
+// Запрос на подключение: invoke('tcp:connect', { host, port, username, password, action })
+ipcMain.handle('tcp:connect', async (_event, config) => {
+  return await connectTcp(config);
 });
 
 // Отправка сообщения: send('tcp:send', messageObj)

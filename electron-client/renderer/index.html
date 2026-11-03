@@ -7,13 +7,19 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- ================= Экран входа ================= -->
+  <!-- ================= Экран входа и регистрации ================= -->
   <div id="loginScreen" class="screen">
     <div class="login-card">
       <div class="login-header">
         <div class="logo-circle">💬</div>
         <h1>Wiretalk</h1>
         <p class="subtitle">Клиент для C++ TCP-мессенджера</p>
+      </div>
+
+      <!-- Вкладки: Вход / Регистрация -->
+      <div class="auth-tabs">
+        <button type="button" id="tabLogin" class="auth-tab active">Вход</button>
+        <button type="button" id="tabRegister" class="auth-tab">Регистрация</button>
       </div>
 
       <form id="loginForm">
@@ -25,9 +31,26 @@
             placeholder="до 16 символов (например, dima)"
             maxlength="16"
             required
-            autocomplete="off"
+            autocomplete="username"
             autofocus
           >
+        </div>
+
+        <div class="form-group">
+          <label for="inputPassword">Пароль</label>
+          <div class="password-input-wrapper">
+            <input
+              type="password"
+              id="inputPassword"
+              placeholder="до 64 символов"
+              maxlength="64"
+              required
+              autocomplete="current-password"
+            >
+            <button type="button" id="btnTogglePassword" class="btn-toggle-password" title="Показать пароль" aria-label="Показать пароль">
+              👁️
+            </button>
+          </div>
         </div>
 
         <div class="form-row">
@@ -44,8 +67,12 @@
         <div id="loginError" class="error-banner hidden"></div>
 
         <button type="submit" id="btnLogin" class="btn btn-primary btn-block">
-          Подключиться
+          Войти
         </button>
+
+        <a href="#" id="authToggleLink" class="auth-toggle-link">
+          Нет аккаунта? Зарегистрироваться
+        </a>
       </form>
     </div>
   </div>

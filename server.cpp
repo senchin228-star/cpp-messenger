@@ -18,6 +18,8 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <openssl/sha.h>
+#include <iomanip>
 #include "socket.hpp"
 #include "net.hpp"
 
@@ -30,7 +32,7 @@ constexpr std::size_t MAX_PRIVATE_HISTORY = 500;
 // Структура для долговременного хранения истории сообщений мессенджера
 struct ServerHistory {
     uint64_t next_id = 1;                              // Уникальный ID для каждого сообщения
-    std::set<std::string> known_users;                // Все пользователи, когда-либо входившие на сервер (в нижнем регистре)
+    std::map<std::string, std::string> users_auth; // Известные пользователи (user -> password)
     std::map<std::string, std::vector<nlohmann::json>> rooms; // История по комнатам (room -> массив сообщений)
     std::map<std::string, std::set<std::string>> users_rooms; // Пользователи и комнаты, в которых они находятся (user -> set<room>)
     std::vector<nlohmann::json> privates;              // История личных сообщений (from, to, message, time, id)
@@ -66,6 +68,17 @@ std::string trim(std::string& str) {
     return str;
 }
 
+// Функция для вычисления SHA-256 хэша строки
+std::string sha256(const std::string& str) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(str.data()), str.size(), hash);
+    std::ostringstream ss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+    }
+    return ss.str();
+}
+
 // Загрузка сохраненной истории из JSON файла при запуске сервера
 void load_history(const std::string& path, ServerHistory& hist) {
     std::ifstream f(path);
@@ -76,9 +89,21 @@ void load_history(const std::string& path, ServerHistory& hist) {
     try {
         nlohmann::json j;
         f >> j;
-        if (j.contains("users") && j["users"].is_array()) {
-            for (const auto& u : j["users"]) {
-                if (u.is_string()) hist.known_users.insert(lowercase(u.get<std::string>()));
+        if (j.contains("users") && !j["users"].is_null()) {
+            if (j["users"].is_object()) {
+                for (auto it = j["users"].begin(); it != j["users"].end(); ++it) {
+                    if (it.value().is_string()) {
+                        hist.users_auth[lowercase(it.key())] = it.value().get<std::string>();
+                    }
+                }
+            } else if (j["users"].is_array()) {
+                for (const auto& u : j["users"]) {
+                    if (u.is_object() && u.contains("user") && u.contains("password")) {
+                        std::string user = lowercase(u.at("user").get<std::string>());
+                        std::string password = u.at("password").get<std::string>();
+                        hist.users_auth[user] = password;
+                    }
+                }
             }
         }
         if (j.contains("rooms") && j["rooms"].is_object()) {
@@ -104,7 +129,7 @@ void load_history(const std::string& path, ServerHistory& hist) {
         std::cout << "Успешно загружена история: "
                   << hist.rooms.size() << " комнат(ы), "
                   << hist.privates.size() << " личных сообщений, "
-                  << hist.known_users.size() << " известных пользователей." << std::endl;
+                  << hist.users_auth.size() << " известных пользователей." << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Ошибка при чтении файла истории " << path << ": " << e.what() << std::endl;
     }
@@ -114,7 +139,7 @@ void load_history(const std::string& path, ServerHistory& hist) {
 void save_history(const std::string& path, const ServerHistory& hist) {
     try {
         nlohmann::json j;
-        j["users"] = hist.known_users;
+        j["users"] = hist.users_auth;
         j["rooms"] = hist.rooms;
         j["privates"] = hist.privates;
         std::ofstream f(path);
@@ -200,13 +225,21 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                 std::string reason;
                 username = trim(username);
                 const std::string username_lower = lowercase(username);
+                const std::string password = j.value("password", "");
                 if (username.size() > 16) reason = "Username too long";
                 if (!client.name.empty()) reason = "User is already logged in";
                 else if (username.empty()) reason = "Empty user name";
-                for (const auto& [other_fd, other_client] : clients){
-                    if (other_fd != client.get_sock() && lowercase(other_client.name) == username_lower){
-                        reason = "Already logged in";
-                        break;
+                else if (hist.users_auth.find(username_lower) == hist.users_auth.end()) reason = "User not registered";
+                else {
+                    std::string password_hash = sha256(password);
+                    if (hist.users_auth[username_lower] != password_hash) reason = "Incorrect password";
+                    else {
+                        for (const auto& [other_fd, other_client] : clients){
+                            if (other_fd != client.get_sock() && lowercase(other_client.name) == username_lower){
+                                reason = "Already logged in";
+                                break;
+                            }
+                        }
                     }
                 }
                 out = {
@@ -228,7 +261,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     std::cout << username << " Logined" << std::endl;
 
                     // Добавляем пользователя в список известных (зарегистрированных)
-                    hist.known_users.insert(user_key);
+                    hist.users_auth[user_key] = hist.users_auth[username_lower]; // сохраняем пароль
                     hist.users_rooms[user_key].insert("general");
                     save_history(HISTORY_FILE, hist);
 
@@ -240,6 +273,37 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     // Отправляем клиенту сохраненные личные сообщения (где он отправитель или получатель)
                     if (!send_private_history(client.get_sock(), client.name, hist)) return false;
                 }
+            }
+            if (type == "register"){
+                std::string username = j.value("user", "");
+                username = trim(username);
+                const std::string username_lower = lowercase(username);
+                std::string reason;
+                if (username.empty()) reason = "Empty user name";
+                else if (username.size() > 16) reason = "Username too long";
+                else if (hist.users_auth.find(username_lower) != hist.users_auth.end()) reason = "User already registered";
+                else if (!j.contains("password") || !j["password"].is_string() || j["password"].get<std::string>().empty()) reason = "Password is required";
+                else if (j["password"].get<std::string>().size() > 64) reason = "Password is too long";
+                else {
+                    std::string password = j.at("password").get<std::string>();
+                    std::string password_hash = sha256(password);
+                    hist.users_auth[username_lower] = password_hash;
+                    save_history(HISTORY_FILE, hist);
+                    std::cout << username << " Registered" << std::endl;
+                }
+
+                out = {
+                    {"type", "register_result"},
+                    {"ok", reason.empty()},
+                    {"reason", reason}
+                };
+                std::string reg_res = out.dump() + '\n';
+                if (!send_all(client.get_sock(), reg_res)) return false;
+                if (!reason.empty()){
+                    std::cout << username << ": Register unsucces. Reason: "<< reason << std::endl;
+                    return false;
+                }
+                continue;
             }
             if (client.name.empty()) continue;
             if (type == "join") {
@@ -301,7 +365,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     });
 
                 const bool is_online = (recipient != clients.end());
-                const bool is_known = is_online || (hist.known_users.find(lowercase(recipient_name)) != hist.known_users.end());
+                const bool is_known = is_online || (hist.users_auth.find(lowercase(recipient_name)) != hist.users_auth.end());
 
                 if (!is_known) {
                     nlohmann::json error = {
@@ -351,7 +415,7 @@ bool process_buffer(Client& client, const std::map<int, Client>& clients, RoomMe
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;
                 }
-                if (hist.known_users.find(user_key) == hist.known_users.end()) {
+                if (hist.users_auth.find(user_key) == hist.users_auth.end()) {
                     nlohmann::json error = {{"type", "error"}, {"er_text", "User not registered: " + client.name}};
                     send_all(client.get_sock(), error.dump() + '\n');
                     continue;

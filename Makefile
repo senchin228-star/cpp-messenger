@@ -9,7 +9,7 @@ client: client.cpp net.cpp socket.hpp net.hpp
 	$(CXX) $(CXXFLAGS) client.cpp net.cpp -o client
 
 server: server.cpp socket.hpp net.hpp
-	$(CXX) $(CXXFLAGS) net.cpp server.cpp -o server
+	$(CXX) $(CXXFLAGS) -lcrypto net.cpp server.cpp -o server
 
 clean:
 	rm -f client server

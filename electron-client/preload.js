@@ -9,8 +9,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   /**
-   * Подключение к C++ серверу и логин
-   * @param {{ host: string, port: number, username: string }} config
+   * Подключение к C++ серверу и логин / регистрация
+   * @param {{ host: string, port: number, username: string, password?: string, action?: 'login'|'register' }} config
    * @returns {Promise<{ ok: boolean, reason: string }>}
    */
   connect: (config) => ipcRenderer.invoke('tcp:connect', config),

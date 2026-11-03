@@ -65,7 +65,16 @@ bool handle_server_data(std::string& buffer, const std::string& my_nick = "")
                     std::cout << "Login success" << std::endl;
                 }
                 else{
-                    std::cout << "Login unsucces. Reason:" << j.at("reason").get<std::string>() << '\n' << std::endl;
+                    std::cout << "Login unsucces. Reason: " << j.at("reason").get<std::string>() << '\n' << std::endl;
+                    return false;
+                }
+            }
+            else if (type == "register_result"){
+                if (j.at("ok").get<bool>()){
+                    std::cout << "Registration success!" << std::endl;
+                }
+                else{
+                    std::cout << "Registration unsucces. Reason: " << j.at("reason").get<std::string>() << '\n' << std::endl;
                     return false;
                 }
             }
@@ -88,14 +97,44 @@ bool handle_server_data(std::string& buffer, const std::string& my_nick = "")
     return true;
 }
 int main(int argc, char *argv[]){
-    if (argc < 2){
-        std::cout << "A nickname is required as the first argument." << std::endl;
+    std::string nickname;
+    std::string password;
+    bool is_register = false;
+
+    if (argc >= 2) {
+        nickname = argv[1];
+        for (int i = 2; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--register" || arg == "-r") {
+                is_register = true;
+            } else if (password.empty()) {
+                password = arg;
+            }
+        }
+    }
+
+    if (nickname.empty()) {
+        std::cout << "Usage: ./client <nickname> [password] [--register]" << std::endl;
+        std::cout << "Enter nickname: ";
+        if (!std::getline(std::cin, nickname)) return 1;
+        nickname = trim(nickname);
+    }
+
+    if (nickname.empty()) {
+        std::cout << "Nickname cannot be empty." << std::endl;
         return 1;
     }
-    if (strlen(argv[1]) > 16){
-        std::cout << "Nickname is too long" << std::endl;
+    if (nickname.size() > 16){
+        std::cout << "Nickname is too long (max 16 chars)" << std::endl;
         return 1;
     }
+
+    if (password.empty()) {
+        std::cout << "Enter password: ";
+        if (!std::getline(std::cin, password)) return 1;
+        password = trim(password);
+    }
+
     Socket sock(socket(AF_INET, SOCK_STREAM, 0));
     if (sock.get() < 0) {
         std::cerr << "Error creating socket" << std::endl;
@@ -117,9 +156,33 @@ int main(int argc, char *argv[]){
 
     char recv_buffer[4096];
     std::string buffer;
+
+    // Если запрошена регистрация: сначала отправляем запрос register
+    if (is_register) {
+        nlohmann::json reg_js = {
+            {"type", "register"},
+            {"user", nickname},
+            {"password", password}
+        };
+        std::string reg_str = reg_js.dump() + '\n';
+        if (!send_all(sock.get(), reg_str)) return 1;
+
+        while (buffer.find('\n') == std::string::npos){
+            ssize_t n = recv(sock.get(), recv_buffer, sizeof(recv_buffer), 0);
+            if (n <= 0) {
+                std::cerr << "Error receiving registration response" << std::endl;
+                return 1;
+            }
+            buffer.append(recv_buffer, static_cast<std::size_t>(n));
+        }
+        if (!handle_server_data(buffer, nickname)) return 1;
+    }
+
+    // Запрос на авторизацию (login)
     nlohmann::json join_request_js = {
         {"type", "login"},
-        {"user", argv[1]}
+        {"user", nickname},
+        {"password", password}
     };
     std::string join_request_str = join_request_js.dump() + '\n';
     if (!send_all(sock.get(), join_request_str)) return 1;
@@ -136,7 +199,7 @@ int main(int argc, char *argv[]){
         }
         buffer.append(recv_buffer, static_cast<std::size_t>(n));
     }
-    if (!handle_server_data(buffer, argv[1])) return 1;
+    if (!handle_server_data(buffer, nickname)) return 1;
 
     std::string input;
     std::string current_room = "general";

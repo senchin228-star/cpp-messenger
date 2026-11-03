@@ -42,6 +42,9 @@ const state = {
   // Ключ: "room:name" или "private:name" -> число
   unreads: new Map(),
 
+  // Текущий режим формы входа: 'login' | 'register'
+  authMode: 'login',
+
   // Текущее прикреплённое изображение:
   // { dataUrl: string, name: string, width: number, height: number, size: number } | null
   attachedImage: null,
@@ -56,9 +59,14 @@ const dom = {
   loginScreen: document.getElementById('loginScreen'),
   chatScreen: document.getElementById('chatScreen'),
 
-  // Форма входа
+  // Форма входа и регистрации
   loginForm: document.getElementById('loginForm'),
+  tabLogin: document.getElementById('tabLogin'),
+  tabRegister: document.getElementById('tabRegister'),
+  authToggleLink: document.getElementById('authToggleLink'),
   inputUsername: document.getElementById('inputUsername'),
+  inputPassword: document.getElementById('inputPassword'),
+  btnTogglePassword: document.getElementById('btnTogglePassword'),
   inputHost: document.getElementById('inputHost'),
   inputPort: document.getElementById('inputPort'),
   btnLogin: document.getElementById('btnLogin'),
@@ -154,7 +162,24 @@ function setupNetworkListeners() {
  * Привязка событий кнопок и форм
  */
 function setupEventListeners() {
-  // Вход / Подключение
+  // Переключение вкладок авторизации (Вход / Регистрация)
+  dom.tabLogin.addEventListener('click', () => setAuthMode('login'));
+  dom.tabRegister.addEventListener('click', () => setAuthMode('register'));
+  dom.authToggleLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    setAuthMode(state.authMode === 'login' ? 'register' : 'login');
+  });
+
+  // Показ / скрытие пароля
+  dom.btnTogglePassword.addEventListener('click', () => {
+    const isPassword = dom.inputPassword.type === 'password';
+    dom.inputPassword.type = isPassword ? 'text' : 'password';
+    dom.btnTogglePassword.textContent = isPassword ? '🙈' : '👁️';
+    dom.btnTogglePassword.title = isPassword ? 'Скрыть пароль' : 'Показать пароль';
+    dom.btnTogglePassword.setAttribute('aria-label', isPassword ? 'Скрыть пароль' : 'Показать пароль');
+  });
+
+  // Вход / Регистрация (отправка формы)
   dom.loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     await handleLogin();
@@ -255,8 +280,37 @@ function setupEventListeners() {
 // 4. ЛОГИКА ВХОДА И УПРАВЛЕНИЯ ПОДКЛЮЧЕНИЕМ
 // ============================================================
 
+function setAuthMode(mode) {
+  state.authMode = mode;
+  hideError();
+  resetPasswordVisibility();
+  if (mode === 'login') {
+    dom.tabLogin.classList.add('active');
+    dom.tabRegister.classList.remove('active');
+    dom.btnLogin.textContent = 'Войти';
+    dom.authToggleLink.textContent = 'Нет аккаунта? Зарегистрироваться';
+  } else {
+    dom.tabRegister.classList.add('active');
+    dom.tabLogin.classList.remove('active');
+    dom.btnLogin.textContent = 'Зарегистрироваться';
+    dom.authToggleLink.textContent = 'Уже есть аккаунт? Войти';
+  }
+}
+
+function resetPasswordVisibility() {
+  if (dom.inputPassword) {
+    dom.inputPassword.type = 'password';
+  }
+  if (dom.btnTogglePassword) {
+    dom.btnTogglePassword.textContent = '👁️';
+    dom.btnTogglePassword.title = 'Показать пароль';
+    dom.btnTogglePassword.setAttribute('aria-label', 'Показать пароль');
+  }
+}
+
 async function handleLogin() {
   const username = dom.inputUsername.value.trim();
+  const password = dom.inputPassword.value.trim();
   const host = dom.inputHost.value.trim() || '127.0.0.1';
   const port = parseInt(dom.inputPort.value.trim(), 10) || 5050;
 
@@ -270,8 +324,18 @@ async function handleLogin() {
     return;
   }
 
+  if (!password) {
+    showError('Введите пароль');
+    return;
+  }
+
+  if (password.length > 64) {
+    showError('Пароль не должен превышать 64 символа');
+    return;
+  }
+
   dom.btnLogin.disabled = true;
-  dom.btnLogin.textContent = 'Подключение...';
+  dom.btnLogin.textContent = state.authMode === 'register' ? 'Регистрация...' : 'Вход...';
   hideError();
 
   try {
@@ -285,9 +349,16 @@ async function handleLogin() {
     state.unreads = new Map();
     state.onlineUsers = new Set([username]);
     state.activeChat = { type: 'room', id: 'general' };
+    clearAttachedImage();
 
-    // Вызываем подключение через preload мост
-    const result = await window.api.connect({ host, port, username });
+    // Вызываем подключение через preload мост с авторизацией
+    const result = await window.api.connect({
+      host,
+      port,
+      username,
+      password,
+      action: state.authMode,
+    });
 
     if (result && result.ok) {
       // Запрашиваем актуальный список комнат и пользователей с сервера
@@ -298,19 +369,21 @@ async function handleLogin() {
       showChatScreen();
       switchChat('room', 'general');
     } else {
-      showError(result.reason || 'Ошибка авторизации');
+      showError(result.reason || (state.authMode === 'register' ? 'Ошибка регистрации' : 'Ошибка авторизации'));
     }
   } catch (err) {
     showError(err.message || 'Не удалось подключиться к серверу');
   } finally {
     dom.btnLogin.disabled = false;
-    dom.btnLogin.textContent = 'Подключиться';
+    dom.btnLogin.textContent = state.authMode === 'register' ? 'Зарегистрироваться' : 'Войти';
   }
 }
 
 function showLoginScreen() {
   dom.chatScreen.classList.add('hidden');
   dom.loginScreen.classList.remove('hidden');
+  dom.inputPassword.value = '';
+  setAuthMode('login');
 }
 
 function showChatScreen() {
